@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>记忆关系图谱 · MemoryAgent</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --border: #334155;
+    --text: #e2e8f0; --text-muted: #94a3b8; --accent: #3b82f6;
+    --pref: #3b82f6; --fact: #22c55e; --goal: #06b6d4;
+    --decision: #a855f7; --obs: #f59e0b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    height: 100vh; overflow: hidden; display: flex; flex-direction: column;
+  }
+
+  /* ── Top bar ── */
+  .topbar {
+    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    background: var(--card); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .topbar h1 { font-size: 16px; font-weight: 600; margin-right: 8px; }
+  .topbar h1 span { color: var(--accent); }
+  .topbar label { font-size: 12px; color: var(--text-muted); }
+  .topbar select, .topbar input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px; font-size: 13px;
+  }
+  .topbar .stat {
+    font-size: 12px; color: var(--text-muted); margin-left: auto;
+    display: flex; gap: 16px;
+  }
+  .topbar .stat span { white-space: nowrap; }
+  .topbar .stat strong { color: var(--text); }
+
+  .filter-group { display: flex; align-items: center; gap: 6px; }
+  .filter-group label { cursor: pointer; display: flex; align-items: center; gap: 3px; font-size: 12px; }
+  .filter-group input[type="checkbox"] { accent-color: var(--accent); }
+
+  /* ── Canvas area ── */
+  .graph-wrapper {
+    flex: 1; position: relative; overflow: hidden;
+  }
+  #graph-canvas {
+    display: block; width: 100%; height: 100%; cursor: grab;
+  }
+  #graph-canvas:active { cursor: grabbing; }
+
+  /* ── Tooltip ── */
+  #tooltip {
+    position: absolute; display: none; pointer-events: none;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; max-width: 320px; z-index: 100;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }
+  #tooltip .content { font-size: 13px; line-height: 1.5; margin-bottom: 4px; }
+  #tooltip .meta { font-size: 11px; color: var(--text-muted); }
+  #tooltip .meta .tag {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 10px; margin-right: 4px;
+  }
+
+  /* ── Detail panel ── */
+  #detail-panel {
+    position: absolute; right: -380px; top: 0; bottom: 0; width: 360px;
+    background: var(--card); border-left: 1px solid var(--border);
+    transition: right 0.3s ease; overflow-y: auto; z-index: 50;
+    padding: 20px;
+  }
+  #detail-panel.open { right: 0; }
+  #detail-panel .close-btn {
+    float: right; background: none; border: none; color: var(--text-muted);
+    font-size: 20px; cursor: pointer;
+  }
+  #detail-panel .close-btn:hover { color: var(--text); }
+  #detail-panel h3 { font-size: 14px; margin-bottom: 8px; }
+  #detail-panel .field { margin-bottom: 12px; }
+  #detail-panel .field label {
+    font-size: 11px; color: var(--text-muted); text-transform: uppercase;
+    letter-spacing: 0.5px; display: block; margin-bottom: 2px;
+  }
+  #detail-panel .field .value { font-size: 14px; line-height: 1.5; }
+  #detail-panel .related-list { list-style: none; }
+  #detail-panel .related-list li {
+    padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+    cursor: pointer;
+  }
+  #detail-panel .related-list li:hover { color: var(--accent); }
+
+  /* ── Legend ── */
+  .legend {
+    position: absolute; bottom: 16px; left: 16px;
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font-size: 11px; z-index: 10;
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+  @media (max-width: 768px) {
+    .topbar .stat { margin-left: 0; width: 100%; justify-content: space-around; }
+    #detail-panel { width: 100%; right: -100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🧠 <span>记忆关系图谱</span></h1>
+  <label>Agent</label>
+  <select id="agent-select" onchange="loadGraph()"></select>
+  <div class="filter-group" id="type-filters"></div>
+  <div class="stat">
+    <span>节点 <strong id="stat-nodes">0</strong></span>
+    <span>连线 <strong id="stat-edges">0</strong></span>
+    <span>密度 <strong id="stat-density">0</strong></span>
+  </div>
+  <button onclick="loadGraph()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">🔄 刷新</button>
+</div>
+
+<div class="graph-wrapper" id="graph-wrapper">
+  <canvas id="graph-canvas"></canvas>
+  <div id="tooltip"></div>
+  <div id="detail-panel"></div>
+  <div class="legend" id="legend"></div>
+</div>
+
+<script>
+// ── Load agents from localStorage (same key as chat) ──
+const STORAGE_KEY = 'memoryagent_v2';
+
+function getAgents() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    // data is { agent_id: { sessions: {...}, agents: {...} } }
+    const agents = [];
+    for (const key of Object.keys(data)) {
+      const entry = data[key];
+      if (entry && typeof entry === 'object') {
+        const name = (entry.agents && entry.agents.name) || key;
+        agents.push({ id: key, name });
+      }
+    }
+    return agents.length > 0 ? agents : [{ id: 'default', name: 'default' }];
+  } catch(e) {
+    return [{ id: 'default', name: 'default' }];
+  }
+}
+
+function initAgentSelect() {
+  const sel = document.getElementById('agent-select');
+  const agents = getAgents();
+  sel.innerHTML = agents.map(a =>
+    `<option value="${a.id}">${a.name}</option>`
+  ).join('');
+  const saved = localStorage.getItem('memoryagent_current_agent');
+  if (saved && agents.some(a => a.id === saved)) sel.value = saved;
+}
+
+// ── Type colors ──
+const TYPE_COLORS = {
+  preference: '#3b82f6', fact: '#22c55e', goal: '#06b6d4',
+  decision: '#a855f7', observation: '#f59e0b',
+};
+const TYPE_NAMES = {
+  preference: '偏好', fact: '事实', goal: '目标',
+  decision: '决策', observation: '观察',
+};
+
+// ── State ──
+let nodes = [], edges = [];
+let animId = null;
+let selectedNodeId = null;
+let hoveredNodeId = null;
+let activeTypeFilters = new Set(['preference', 'fact', 'goal', 'decision', 'observation']);
+
+// ── Init type filters ──
+function initTypeFilters() {
+  const container = document.getElementById('type-filters');
+  container.innerHTML = '';
+  for (const [type, name] of Object.entries(TYPE_NAMES)) {
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" checked onchange="toggleType('${type}')" />
+      <span style="color:${TYPE_COLORS[type]}">●</span> ${name}`;
+    container.appendChild(label);
+  }
+}
+
+function toggleType(type) {
+  if (activeTypeFilters.has(type)) activeTypeFilters.delete(type);
+  else activeTypeFilters.add(type);
+  loadGraph();
+}
+
+// ── Load graph data ──
+let loadedAgentId = '';
+
+async function loadGraph() {
+  const agentId = document.getElementById('agent-select').value;
+  if (!agentId) return;
+  loadedAgentId = agentId;
+  localStorage.setItem('memoryagent_current_agent', agentId);
+
+  try {
+    const resp = await fetch(`/memory-graph?agent_id=${encodeURIComponent(agentId)}&limit=80&threshold=0.15`);
+    const data = await resp.json();
+
+    // Filter by type
+    const visibleIds = new Set();
+    const typeNodes = data.nodes.filter(n => activeTypeFilters.has(n.memory_type));
+    typeNodes.forEach(n => visibleIds.add(n.id));
+
+    nodes = typeNodes.map(n => ({
+      id: n.id, content: n.content, type: n.memory_type,
+      confidence: n.confidence,
+      x: Math.random() * 800, y: Math.random() * 600,
+      vx: 0, vy: 0, fx: 0, fy: 0,
+    }));
+
+    edges = data.edges
+      .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
+      .map(e => ({
+        source: e.source, target: e.target, strength: e.strength,
+      }));
+
+    // Stats
+    document.getElementById('stat-nodes').textContent = nodes.length;
+    document.getElementById('stat-edges').textContent = edges.length;
+    document.getElementById('stat-density').textContent = data.stats.density;
+
+    // Legend
+    renderLegend();
+
+    // Start simulation
+    resizeCanvas();
+    startSimulation();
+  } catch(e) {
+    document.getElementById('stat-nodes').textContent = '⚠️ 加载失败';
+  }
+}
+
+// ── Canvas & resize ──
+function resizeCanvas() {
+  const wrapper = document.getElementById('graph-wrapper');
+  const canvas = document.getElementById('graph-canvas');
+  const rect = wrapper.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height;
+}
+
+// ── Force simulation ──
+function startSimulation() {
+  if (animId) cancelAnimationFrame(animId);
+
+  const canvas = document.getElementById('graph-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  if (nodes.length === 0) {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#64748b'; ctx.font = '16px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText('暂无记忆数据', W/2, H/2);
+    return;
+  }
+
+  // Initialize positions (spiral if too many)
+  if (nodes.length > 0 && nodes[0].x > W * 0.9) {
+    const cx = W/2, cy = H/2;
+    nodes.forEach((n, i) => {
+      const angle = i * 2.4;
+      const r = 30 + i * 8;
+      n.x = cx + Math.cos(angle) * Math.min(r, W*0.4);
+      n.y = cy + Math.sin(angle) * Math.min(r, H*0.4);
+    });
+  }
+
+  const nodeMap = {};
+  nodes.forEach(n => { nodeMap[n.id] = n; });
+
+  function simulate() {
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // Skip physics if too many nodes — just render
+    if (nodes.length <= 120) {
+      // Reset forces
+      for (const n of nodes) { n.fx = 0; n.fy = 0; }
+
+      // Repulsion (Barnes-Hut simplified)
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i], b = nodes[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const dist = Math.max(5, Math.sqrt(dx*dx + dy*dy));
+          const force = 2000 / (dist * dist + 1);
+          a.fx -= force * dx / dist;
+          a.fy -= force * dy / dist;
+          b.fx += force * dx / dist;
+          b.fy += force * dy / dist;
+        }
+      }
+
+      // Attraction along edges
+      for (const e of edges) {
+        const a = nodeMap[e.source], b = nodeMap[e.target];
+        if (!a || !b) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        const force = dist * e.strength * 0.008;
+        a.fx += force * dx / dist;
+        a.fy += force * dy / dist;
+        b.fx -= force * dx / dist;
+        b.fy -= force * dy / dist;
+      }
+
+      // Center gravity
+      for (const n of nodes) {
+        n.fx += (W/2 - n.x) * 0.001;
+        n.fy += (H/2 - n.y) * 0.001;
+      }
+
+      // Apply velocity
+      for (const n of nodes) {
+        n.vx = (n.vx + n.fx) * 0.8;
+        n.vy = (n.vy + n.fy) * 0.8;
+        n.x += n.vx;
+        n.y += n.vy;
+        n.x = Math.max(5, Math.min(W - 5, n.x));
+        n.y = Math.max(5, Math.min(H - 5, n.y));
+      }
+    }
+
+    // ── Render ──
+    // Edges
+    for (const e of edges) {
+      const a = nodeMap[e.source], b = nodeMap[e.target];
+      if (!a || !b) continue;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.35})`;
+      ctx.lineWidth = e.strength * 2 + 0.5;
+      ctx.stroke();
+    }
+
+    // Nodes
+    for (const n of nodes) {
+      const radius = 4 + n.confidence * 6;
+      const isSelected = n.id === selectedNodeId;
+      const isHovered = n.id === hoveredNodeId;
+      const color = TYPE_COLORS[n.type] || '#94a3b8';
+
+      // Glow for selected
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, radius + 6, 0, Math.PI * 2);
+        ctx.fillStyle = color + '33';
+        ctx.fill();
+      }
+
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      if (isHovered || isSelected) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      // Label for high confidence nodes
+      if (n.confidence > 0.6 || isHovered) {
+        ctx.fillStyle = isHovered ? '#fff' : '#cbd5e1';
+        ctx.font = isHovered ? 'bold 10px sans-serif' : '9px sans-serif';
+        ctx.textAlign = 'center';
+        const label = n.content.length > 12 ? n.content.slice(0, 12) + '…' : n.content;
+        ctx.fillText(label, n.x, n.y - radius - 4);
+      }
+    }
+
+    animId = requestAnimationFrame(simulate);
+  }
+
+  simulate();
+}
+
+// ── Mouse interaction ──
+function getNodeAt(x, y) {
+  const canvas = document.getElementById('graph-canvas');
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const cx = (x - rect.left) * scaleX;
+  const cy = (y - rect.top) * scaleY;
+
+  // Search in reverse (topmost first)
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    const r = 4 + n.confidence * 6;
+    const dx = cx - n.x, dy = cy - n.y;
+    if (dx*dx + dy*dy <= (r + 6) * (r + 6)) return n;
+  }
+  return null;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const canvas = document.getElementById('graph-canvas');
+  const tooltip = document.getElementById('tooltip');
+  const detailPanel = document.getElementById('detail-panel');
+
+  canvas.addEventListener('mousemove', (e) => {
+    const n = getNodeAt(e.clientX, e.clientY);
+    hoveredNodeId = n ? n.id : null;
+    canvas.style.cursor = n ? 'pointer' : 'grab';
+
+    if (n) {
+      const color = TYPE_COLORS[n.type] || '#94a3b8';
+      tooltip.style.display = 'block';
+      tooltip.style.left = (e.clientX + 16) + 'px';
+      tooltip.style.top = (e.clientY + 16) + 'px';
+      tooltip.innerHTML = `
+        <div class="content">${n.content}</div>
+        <div class="meta">
+          <span class="tag" style="background:${color}33;color:${color}">${TYPE_NAMES[n.type] || n.type}</span>
+          置信度 ${n.confidence.toFixed(2)}
+        </div>
+      `;
+    } else {
+      tooltip.style.display = 'none';
+    }
+  });
+
+  canvas.addEventListener('click', (e) => {
+    const n = getNodeAt(e.clientX, e.clientY);
+    if (!n) { closeDetail(); return; }
+    selectedNodeId = n.id;
+    showDetail(n);
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    hoveredNodeId = null;
+    tooltip.style.display = 'none';
+  });
+
+  // Resize
+  window.addEventListener('resize', () => {
+    resizeCanvas();
+  });
+
+  initAgentSelect();
+  initTypeFilters();
+  loadGraph();
+});
+
+// ── Detail panel ──
+function showDetail(node) {
+  const panel = document.getElementById('detail-panel');
+
+  // Find connected nodes
+  const connectedIds = new Set();
+  const connections = [];
+  for (const e of edges) {
+    if (e.source === node.id) { connectedIds.add(e.target); connections.push({ id: e.target, strength: e.strength }); }
+    if (e.target === node.id) { connectedIds.add(e.source); connections.push({ id: e.source, strength: e.strength }); }
+  }
+
+  const relatedNodes = nodes.filter(n => connectedIds.has(n.id))
+    .sort((a, b) => b.confidence - a.confidence);
+
+  const color = TYPE_COLORS[node.type] || '#94a3b8';
+
+  panel.innerHTML = `
+    <button class="close-btn" onclick="closeDetail()">✕</button>
+    <h3 style="color:${color}">${TYPE_NAMES[node.type] || node.type}</h3>
+    <div class="field">
+      <label>内容</label>
+      <div class="value">${node.content}</div>
+    </div>
+    <div class="field">
+      <label>置信度</label>
+      <div class="value">${(node.confidence * 100).toFixed(0)}%</div>
+    </div>
+    <div class="field">
+      <label>关联记忆 (${connections.length})</label>
+      ${relatedNodes.length > 0 ? `
+        <ul class="related-list">
+          ${relatedNodes.slice(0, 10).map(r =>
+            `<li onclick="focusNode('${r.id}')">${r.content.slice(0, 40)}${r.content.length > 40 ? '…' : ''}
+              <span style="font-size:11px;color:var(--text-muted);margin-left:6px;">
+                ${(connections.find(c => c.id === r.id)?.strength || 0).toFixed(2)}
+              </span>
+            </li>`
+          ).join('')}
+        </ul>
+      ` : '<span style="font-size:13px;color:var(--text-muted)">无关联记忆</span>'}
+    </div>
+  `;
+  panel.classList.add('open');
+}
+
+function closeDetail() {
+  selectedNodeId = null;
+  document.getElementById('detail-panel').classList.remove('open');
+}
+
+function focusNode(id) {
+  closeDetail();
+  selectedNodeId = id;
+  const n = nodes.find(x => x.id === id);
+  if (n) showDetail(n);
+}
+
+function renderLegend() {
+  const legend = document.getElementById('legend');
+  const activeTypes = [...activeTypeFilters];
+  legend.innerHTML = activeTypes.map(t =>
+    `<span class="legend-item">
+      <span class="legend-dot" style="background:${TYPE_COLORS[t] || '#94a3b8'}"></span>
+      ${TYPE_NAMES[t] || t}
+    </span>`
+  ).join('');
+}
+
+// ── Keyboard shortcuts ──
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeDetail();
+  if (e.key === 'r' || e.key === 'R') loadGraph();
+});
+</script>
+</body>
+</html>

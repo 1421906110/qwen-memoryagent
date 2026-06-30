@@ -567,3 +567,74 @@ async def merge_memories(
         limit=limit,
     )
     return stats
+
+
+@app.get("/graph", response_class=HTMLResponse, include_in_schema=False)
+async def graph_page():
+    """Memory relationship graph page."""
+    return _read_html("graph.html")
+
+
+@app.get("/memory-graph")
+async def memory_graph(
+    agent_id: str,
+    limit: int = 50,
+    min_confidence: float = 0.1,
+    threshold: float = 0.2,
+):
+    """Build memory relationship graph for an agent.
+
+    Returns nodes (memories) and edges (similarity relationships).
+
+    Args:
+        agent_id: Target agent.
+        limit: Max memories to include.
+        min_confidence: Minimum confidence filter.
+        threshold: Minimum similarity to create an edge.
+    """
+    assert store is not None
+    assert memory_service is not None
+
+    memories = store.search(
+        agent_id=agent_id,
+        limit=limit,
+        min_confidence=min_confidence,
+    )
+
+    nodes = []
+    for m in memories:
+        nodes.append({
+            "id": m.id,
+            "content": m.content,
+            "memory_type": m.memory_type,
+            "confidence": round(m.confidence, 3),
+            "tags": m.tags,
+            "created_at": m.created_at,
+            "session_id": m.session_id,
+        })
+
+    edges = []
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            sim = memory_service._compute_pairwise_sim(
+                nodes[i]["content"], nodes[j]["content"]
+            )
+            if sim >= threshold:
+                edges.append({
+                    "source": nodes[i]["id"],
+                    "target": nodes[j]["id"],
+                    "strength": round(sim, 3),
+                })
+
+    return {
+        "agent_id": agent_id,
+        "nodes": nodes,
+        "edges": edges,
+        "stats": {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "density": round(
+                len(edges) / max(1, len(nodes) * (len(nodes) - 1) / 2), 4
+            ),
+        },
+    }
