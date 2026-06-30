@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemoryAgent — 记忆仪表盘</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #1a2332;
+    --border: #334155;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --accent-soft: #1e3a5f;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --purple: #a855f7;
+    --cyan: #06b6d4;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px 24px 40px;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 20px; padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .header h1 { font-size: 22px; font-weight: 600; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .header-right select {
+    padding: 6px 12px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-size: 13px; cursor: pointer;
+    max-width: 200px;
+  }
+  .header-right select:focus { border-color: var(--accent); outline: none; }
+  .header-right a {
+    padding: 7px 16px; border-radius: var(--radius);
+    background: var(--accent); color: white; text-decoration: none;
+    font-size: 13px; transition: background 0.12s;
+  }
+  .header-right a:hover { background: var(--accent-hover); }
+
+  /* ── Stats Cards Row ── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px; margin-bottom: 20px;
+  }
+  .stat-card {
+    background: var(--surface); border-radius: 10px; padding: 16px;
+    border: 1px solid var(--border); text-align: center;
+  }
+  .stat-card .num { font-size: 28px; font-weight: 700; line-height: 1.2; }
+  .stat-card .label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .num-blue { color: var(--accent); }
+  .num-green { color: var(--green); }
+  .num-amber { color: var(--amber); }
+  .num-red { color: var(--red); }
+  .num-purple { color: var(--purple); }
+  .num-cyan { color: var(--cyan); }
+
+  /* ── Cards Grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px; margin-bottom: 20px;
+  }
+  .card {
+    background: var(--surface); border-radius: 12px; padding: 18px;
+    border: 1px solid var(--border);
+  }
+  .card.span-2 { grid-column: span 2; }
+  .card h3 {
+    font-size: 13px; font-weight: 600; color: var(--text-dim);
+    margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.3px;
+  }
+  .chart-container { position: relative; height: 200px; }
+  .chart-container.tall { height: 260px; }
+
+  /* ── Network Graph ── */
+  #network-canvas {
+    width: 100%; height: 300px;
+    border-radius: var(--radius);
+    cursor: grab;
+  }
+  #network-canvas:active { cursor: grabbing; }
+  .network-legend {
+    display: flex; gap: 14px; flex-wrap: wrap;
+    margin-top: 8px; font-size: 11px; color: var(--text-muted);
+  }
+  .network-legend span { display: flex; align-items: center; gap: 4px; }
+  .network-legend .dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
+  }
+
+  /* ── Memory Table ── */
+  .table-wrap { max-height: 360px; overflow-y: auto; }
+  .table-wrap::-webkit-scrollbar { width: 4px; }
+  .table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .mem-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .mem-table th {
+    text-align: left; color: var(--text-muted); font-weight: 500;
+    padding: 7px 6px; border-bottom: 1px solid var(--border);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px;
+    position: sticky; top: 0; background: var(--surface); z-index: 1;
+  }
+  .mem-table td { padding: 7px 6px; border-bottom: 1px solid var(--border-light, #1e2a3a); }
+  .mem-table tr:hover td { background: var(--bg); }
+  .mem-table .cont { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    white-space: nowrap;
+  }
+  .tag-preference { background: #3b82f622; color: #60a5fa; }
+  .tag-fact { background: #22c55e22; color: #4ade80; }
+  .tag-observation { background: #f59e0b22; color: #fbbf24; }
+  .tag-decision { background: #a855f722; color: #c084fc; }
+  .tag-goal { background: #06b6d422; color: #22d3ee; }
+
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+  .badge-good { background: #22c55e22; color: #4ade80; }
+  .badge-warn { background: #f59e0b22; color: #fbbf24; }
+  .badge-bad { background: #ef444422; color: #f87171; }
+
+  /* ── Preference Chain ── */
+  .pref-chain { display: flex; flex-direction: column; gap: 6px; }
+  .pref-item {
+    padding: 8px 12px; border-radius: 6px; border-left: 3px solid var(--accent);
+    background: var(--bg); font-size: 13px;
+  }
+  .pref-item .date { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .pref-item .superseded { text-decoration: line-through; opacity: 0.5; }
+
+  .loading {
+    text-align: center; padding: 40px; color: var(--text-dim); font-size: 14px;
+  }
+  .empty-state {
+    text-align: center; padding: 30px; color: var(--text-muted);
+    font-size: 13px; line-height: 1.6;
+  }
+
+  @media (max-width: 768px) {
+    .grid { grid-template-columns: 1fr; }
+    .card.span-2 { grid-column: span 1; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📊 MemoryAgent 仪表盘</h1>
+  <div class="header-right">
+    <select id="agent-select" onchange="switchAgent(this.value)"></select>
+    <a href="/chat">← 返回聊天</a>
+  </div>
+</div>
+
+<div class="stats-row" id="stats-overview">
+  <div class="stat-card"><div class="num num-blue" id="st-mem">—</div><div class="label">总记忆</div></div>
+  <div class="stat-card"><div class="num num-green" id="st-pref">—</div><div class="label">偏好数</div></div>
+  <div class="stat-card"><div class="num num-amber" id="st-risk">—</div><div class="label">需刷新</div></div>
+  <div class="stat-card"><div class="num" id="st-avg-conf">—</div><div class="label">平均置信度</div></div>
+  <div class="stat-card"><div class="num num-purple" id="st-health">—</div><div class="label">健康分</div></div>
+  <div class="stat-card"><div class="num num-cyan" id="st-types">—</div><div class="label">记忆类型</div></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>📈 置信度分布</h3>
+    <div class="chart-container" id="confidence-container">
+      <canvas id="confidence-chart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <h3>🧩 记忆类型分布</h3>
+    <div class="chart-container" id="type-container">
+      <canvas id="type-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card span-2">
+    <h3>📈 记忆增长趋势</h3>
+    <div class="chart-container tall" id="growth-container">
+      <canvas id="growth-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card span-2">
+    <h3>🔗 记忆关系网络</h3>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">节点=记忆，连线=内容相似度 > 0.5</p>
+    <canvas id="network-canvas"></canvas>
+    <div class="network-legend" id="network-legend"></div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card span-2">
+    <h3>📉 置信度衰减曲线</h3>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <select id="decay-memory-select" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px"></select>
+      <button onclick="loadDecayTrace()" style="padding:6px 16px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:white;cursor:pointer;font-size:12px">查看衰减</button>
+    </div>
+    <div class="chart-container tall" id="decay-container">
+      <canvas id="decay-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card span-2">
+    <h3>🔄 偏好演变链</h3>
+    <div id="pref-chain-container" class="pref-chain"></div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:24px">
+  <h3>📋 记忆明细</h3>
+  <div class="table-wrap">
+    <table class="mem-table" id="memory-table">
+      <thead>
+        <tr><th>类型</th><th>内容</th><th>置信度</th><th>衰减</th><th>已过</th><th>访问</th><th>状态</th></tr>
+      </thead>
+      <tbody id="memory-tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+// ── Agent sync with chat.html ──
+const STORAGE_KEY = 'memoryagent_v2';
+
+function getAgentFromStorage() {
+  try {
+    const d = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    return d.activeAgent || '';
+  } catch { return ''; }
+}
+
+function getAllAgents() {
+  try {
+    const d = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    return Object.entries(d.agents || {}).map(([id, a]) => ({ id, name: a.name || id }));
+  } catch { return []; }
+}
+
+let currentAgent = getAgentFromStorage() || 'web-demo-agent';
+let allMemories = [];
+let confidenceChart = null;
+let decayChart = null;
+let typeChart = null;
+let growthChart = null;
+let networkAnim = null;
+
+// ── Agent Switcher ──
+function populateAgentList() {
+  const select = document.getElementById('agent-select');
+  const agents = getAllAgents();
+  if (agents.length > 0) {
+    select.innerHTML = agents.map(a =>
+      `<option value="${a.id}" ${a.id === currentAgent ? 'selected' : ''}>🧠 ${a.name}</option>`
+    ).join('');
+  } else {
+    select.innerHTML = `<option value="${currentAgent}">🧠 ${currentAgent}</option>`;
+  }
+}
+
+function switchAgent(id) {
+  currentAgent = id;
+  populateAgentList();
+  loadDashboard();
+}
+
+// ── Load Dashboard ──
+function loadDashboard() {
+  Promise.all([
+    fetch('/status?agent_id=' + currentAgent).then(r => r.json()),
+    fetch('/decay-analysis?agent_id=' + currentAgent).then(r => r.json()),
+    fetch('/preferences/history?agent_id=' + currentAgent).then(r => r.json()),
+  ])
+  .then(([status, analysis, prefHistory]) => {
+    allMemories = analysis.memories || [];
+    renderStats(status, analysis);
+    drawConfidenceChart(allMemories);
+    drawTypeChart(allMemories);
+    drawGrowthChart(allMemories);
+    drawNetwork(allMemories);
+    renderTable(allMemories);
+    populateDecaySelect(allMemories);
+    renderPreferenceHistory(prefHistory.history || []);
+  })
+  .catch(e => {
+    document.querySelectorAll('.chart-container, #network-canvas, .table-wrap, .pref-chain').forEach(el => {
+      el.innerHTML = '<div class="empty-state">⚠️ 加载失败，请刷新重试</div>';
+    });
+  });
+}
+
+// ── Stats ──
+function renderStats(status, analysis) {
+  const mems = analysis.memories || [];
+  const needRefresh = mems.filter(m => m.needs_refresh).length;
+  const avgConf = mems.length
+    ? (mems.reduce((s, m) => s + (m.effective_confidence || m.confidence || 0), 0) / mems.length)
+    : 0;
+
+  document.getElementById('st-mem').textContent = status.memory_count || 0;
+  document.getElementById('st-pref').textContent = status.preferences?.preferences?.length || 0;
+  document.getElementById('st-risk').textContent = needRefresh;
+  document.getElementById('st-avg-conf').textContent = avgConf ? avgConf.toFixed(2) : '—';
+
+  // Health score: weighted combination
+  const healthScore = calcHealth(mems, needRefresh);
+  document.getElementById('st-health').textContent = healthScore;
+  document.getElementById('st-health').style.color = healthScore >= 80 ? 'var(--green)' : healthScore >= 50 ? 'var(--amber)' : 'var(--red)';
+
+  // Unique types
+  const types = new Set(mems.map(m => m.memory_type).filter(Boolean));
+  document.getElementById('st-types').textContent = types.size;
+}
+
+function calcHealth(mems, needRefresh) {
+  if (mems.length === 0) return 100;
+  const avgConf = mems.reduce((s, m) => s + (m.effective_confidence || m.confidence || 0), 0) / mems.length;
+  const refreshPenalty = (needRefresh / mems.length) * 50;
+  const confScore = avgConf * 80;
+  const accessScore = Math.min(20, mems.reduce((s, m) => s + Math.min(5, m.access_count || 0), 0) / mems.length * 5);
+  return Math.round(Math.max(0, Math.min(100, confScore + accessScore - refreshPenalty)));
+}
+
+// ── Confidence Chart (bar by type) ──
+function drawConfidenceChart(memories) {
+  const ctx = document.getElementById('confidence-chart').getContext('2d');
+  if (confidenceChart) confidenceChart.destroy();
+
+  const byType = {};
+  memories.forEach(m => {
+    const t = m.memory_type || 'unknown';
+    if (!byType[t]) byType[t] = [];
+    byType[t].push(m.effective_confidence || m.confidence || 0);
+  });
+  const labels = Object.keys(byType);
+  const data = labels.map(t => byType[t].reduce((a, b) => a + b, 0) / byType[t].length);
+  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4'];
+
+  if (labels.length === 0) {
+    document.getElementById('confidence-container').innerHTML = '<div class="empty-state">暂无记忆数据</div>';
+    return;
+  }
+
+  confidenceChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels.map(l => ({preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'}[l]||l)),
+      datasets: [{
+        data: data,
+        backgroundColor: colors.slice(0, labels.length).map(c => c + '66'),
+        borderColor: colors.slice(0, labels.length),
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { beginAtZero: true, max: 1, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+        x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+      }
+    }
+  });
+}
+
+// ── Type Distribution (doughnut) ──
+function drawTypeChart(memories) {
+  const ctx = document.getElementById('type-chart').getContext('2d');
+  if (typeChart) typeChart.destroy();
+
+  const counts = {};
+  memories.forEach(m => {
+    const t = m.memory_type || 'unknown';
+    counts[t] = (counts[t] || 0) + 1;
+  });
+  const labels = Object.keys(counts);
+  const data = Object.values(counts);
+  const labelMap = {preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'};
+  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4'];
+
+  if (labels.length === 0) {
+    document.getElementById('type-container').innerHTML = '<div class="empty-state">暂无数据</div>';
+    return;
+  }
+
+  typeChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: labels.map(l => labelMap[l] || l),
+      datasets: [{
+        data: data,
+        backgroundColor: colors.slice(0, labels.length),
+        borderWidth: 0,
+        hoverOffset: 8,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      cutout: '55%',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { color: '#94a3b8', padding: 12, font: { size: 11 }, usePointStyle: true, pointStyle: 'circle' }
+        }
+      }
+    }
+  });
+}
+
+// ── Growth Chart ──
+function drawGrowthChart(memories) {
+  const ctx = document.getElementById('growth-chart').getContext('2d');
+  if (growthChart) growthChart.destroy();
+
+  if (memories.length === 0) {
+    document.getElementById('growth-container').innerHTML = '<div class="empty-state">暂无记忆数据，开始对话后会显示增长趋势</div>';
+    return;
+  }
+
+  // Group by date
+  const byDate = {};
+  memories.forEach(m => {
+    const ts = m.created_at || m.updated_at;
+    if (!ts) return;
+    const d = new Date(ts * 1000).toISOString().slice(0, 10);
+    byDate[d] = (byDate[d] || 0) + 1;
+  });
+  const dates = Object.keys(byDate).sort();
+  if (dates.length === 0) {
+    document.getElementById('growth-container').innerHTML = '<div class="empty-state">暂无时间数据</div>';
+    return;
+  }
+
+  // Cumulative
+  let cum = 0;
+  const cumData = dates.map(d => { cum += byDate[d]; return cum; });
+
+  growthChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: dates.map(d => d.slice(5)),
+      datasets: [{
+        label: '记忆累积',
+        data: cumData,
+        borderColor: '#3b82f6',
+        backgroundColor: '#3b82f622',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        pointBackgroundColor: '#3b82f6',
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
+      },
+      scales: {
+        y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', stepSize: 1 } },
+        x: { grid: { display: false }, ticks: { color: '#94a3b8', maxTicksLimit: 12 } }
+      }
+    }
+  });
+}
+
+// ── Network Graph ──
+function drawNetwork(memories) {
+  const canvas = document.getElementById('network-canvas');
+  const container = canvas.parentElement;
+  const rect = container.getBoundingClientRect();
+  canvas.width = rect.width - 36;
+  canvas.height = 300;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  if (memories.length < 2) {
+    ctx.fillStyle = '#64748b'; ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText('需要至少2条记忆才能生成关系网络', W/2, H/2);
+    document.getElementById('network-legend').innerHTML = '';
+    return;
+  }
+
+  const nodes = memories.slice(0, 30).map((m, i) => ({
+    id: m.id, content: m.content, type: m.memory_type || 'observation',
+    confidence: m.effective_confidence || m.confidence || 0.5,
+    x: Math.random() * W, y: Math.random() * H,
+    vx: 0, vy: 0
+  }));
+
+  // Compute edges by tag/content similarity
+  const edges = [];
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      let sim = 0;
+      // Same type bonus
+      if (nodes[i].type === nodes[j].type) sim += 0.3;
+      // Content word overlap
+      const words1 = new Set(nodes[i].content.toLowerCase().split(/\s+/));
+      const words2 = new Set(nodes[j].content.toLowerCase().split(/\s+/));
+      const inter = new Set([...words1].filter(w => words2.has(w) && w.length > 1));
+      if (words1.size + words2.size > 0) {
+        sim += (inter.size * 2) / (words1.size + words2.size) * 0.7;
+      }
+      if (sim > 0.3) edges.push({ from: i, to: j, strength: sim });
+    }
+  }
+
+  if (edges.length === 0) {
+    document.getElementById('network-legend').innerHTML = '<span style="color:var(--text-muted)">记忆间暂无明显关联</span>';
+    ctx.fillStyle = '#64748b'; ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText('记忆间暂无明显关联', W/2, H/2);
+    return;
+  }
+
+  // Legend
+  const typeColors = { preference:'#3b82f6', fact:'#22c55e', goal:'#06b6d4', decision:'#a855f7', observation:'#f59e0b' };
+  const typeNames = { preference:'偏好', fact:'事实', goal:'目标', decision:'决策', observation:'观察' };
+  const types = [...new Set(nodes.map(n => n.type))];
+  document.getElementById('network-legend').innerHTML = types.map(t =>
+    `<span><span class="dot" style="background:${typeColors[t]||'#94a3b8'}"></span> ${typeNames[t]||t}</span>`
+  ).join('') + `<span style="margin-left:auto;font-size:10px">${nodes.length}节点 · ${edges.length}连线</span>`;
+
+  // Force simulation
+  if (networkAnim) cancelAnimationFrame(networkAnim);
+
+  function simulate() {
+    // Repulsion between all nodes
+    for (const n of nodes) { n.fx = 0; n.fy = 0; }
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[j].x - nodes[i].x;
+        const dy = nodes[j].y - nodes[i].y;
+        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        const force = 800 / (dist * dist);
+        nodes[i].fx -= force * dx / dist;
+        nodes[i].fy -= force * dy / dist;
+        nodes[j].fx += force * dx / dist;
+        nodes[j].fy += force * dy / dist;
+      }
+    }
+    // Attraction along edges
+    for (const e of edges) {
+      const a = nodes[e.from], b = nodes[e.to];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+      const force = dist * e.strength * 0.01;
+      a.fx += force * dx / dist;
+      a.fy += force * dy / dist;
+      b.fx -= force * dx / dist;
+      b.fy -= force * dy / dist;
+    }
+    // Center gravity
+    for (const n of nodes) {
+      n.fx += (W/2 - n.x) * 0.002;
+      n.fy += (H/2 - n.y) * 0.002;
+    }
+    // Apply
+    for (const n of nodes) {
+      n.vx = (n.vx + n.fx) * 0.85;
+      n.vy = (n.vy + n.fy) * 0.85;
+      n.x += n.vx; n.y += n.vy;
+      n.x = Math.max(10, Math.min(W-10, n.x));
+      n.y = Math.max(10, Math.min(H-10, n.y));
+    }
+
+    // Render
+    ctx.clearRect(0, 0, W, H);
+    // Edges
+    for (const e of edges) {
+      ctx.beginPath();
+      ctx.moveTo(nodes[e.from].x, nodes[e.from].y);
+      ctx.lineTo(nodes[e.to].x, nodes[e.to].y);
+      ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.4})`;
+      ctx.lineWidth = e.strength * 2;
+      ctx.stroke();
+    }
+    // Nodes
+    for (const n of nodes) {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, 4 + n.confidence * 4, 0, Math.PI * 2);
+      ctx.fillStyle = typeColors[n.type] || '#94a3b8';
+      ctx.fill();
+      // Label for high-confidence
+      if (n.confidence > 0.7) {
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(n.content.slice(0, 10) + (n.content.length > 10 ? '…' : ''), n.x, n.y - 8);
+      }
+    }
+
+    networkAnim = requestAnimationFrame(simulate);
+  }
+  simulate();
+}
+
+// ── Decay Trace ──
+function populateDecaySelect(memories) {
+  const select = document.getElementById('decay-memory-select');
+  select.innerHTML = '<option value="">选择记忆查看衰减曲线...</option>';
+  memories.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.content;
+    select.appendChild(opt);
+  });
+}
+
+function loadDecayTrace() {
+  const id = document.getElementById('decay-memory-select').value;
+  if (!id) return;
+
+  fetch('/decay-trace/' + id + '?days=30&points=30')
+    .then(r => r.json())
+    .then(data => {
+      const ctx = document.getElementById('decay-chart').getContext('2d');
+      if (decayChart) decayChart.destroy();
+
+      const labels = data.trace.map(t => '第' + (t.age_hours / 24).toFixed(1) + '天');
+      const values = data.trace.map(t => t.confidence);
+
+      decayChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels, datasets: [{
+            label: '置信度',
+            data: values,
+            borderColor: '#3b82f6',
+            backgroundColor: '#3b82f633',
+            fill: true,
+            tension: 0.4,
+            pointRadius: 2,
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            title: { display: true, text: `半衰期: ${data.halflife_hours}h · 初始置信度: ${data.initial_confidence}`, color: '#94a3b8', font: { size: 12 } }
+          },
+          scales: {
+            y: { beginAtZero: true, max: 1, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+            x: { grid: { display: false }, ticks: { color: '#94a3b8', maxTicksLimit: 10 } }
+          }
+        }
+      });
+    });
+}
+
+// ── Memory Table ──
+function renderTable(memories) {
+  const tbody = document.getElementById('memory-tbody');
+  tbody.innerHTML = '';
+  memories.slice(0, 100).forEach(m => {
+    const tr = document.createElement('tr');
+    const statusBadge = m.needs_refresh
+      ? '<span class="badge badge-warn">⚠️ 需刷新</span>'
+      : '<span class="badge badge-good">✅ 健康</span>';
+    const age = m.age_hours < 24
+      ? Math.round(m.age_hours) + 'h'
+      : (m.age_hours / 24).toFixed(1) + 'd';
+    const conf = m.effective_confidence || m.confidence || 0;
+    tr.innerHTML = `
+      <td><span class="tag tag-${m.memory_type}">${({preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'}[m.memory_type]||m.memory_type)}</span></td>
+      <td class="cont" title="${esc(m.content)}">${esc(m.content)}</td>
+      <td>${conf.toFixed(2)}</td>
+      <td>${m.decay_factor || '—'}</td>
+      <td>${age}</td>
+      <td>${m.access_count || 0}</td>
+      <td>${statusBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+  if (memories.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:30px">暂无记忆数据 — 开始对话即可自动创建记忆</td></tr>';
+  }
+}
+
+// ── Preference History ──
+function renderPreferenceHistory(history) {
+  const container = document.getElementById('pref-chain-container');
+  container.innerHTML = '';
+  if (history.length === 0) {
+    container.innerHTML = '<div class="empty-state">暂无偏好数据 — 开始对话即可自动学习偏好</div>';
+    return;
+  }
+  history.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'pref-item';
+    const cls = p.is_active ? '' : 'superseded';
+    const label = p.is_active ? '<span class="badge badge-good">当前</span>' : '<span class="badge badge-bad">已过时</span>';
+    const date = new Date(p.created_at * 1000).toLocaleString('zh-CN');
+    div.innerHTML = `<div class="${cls}">${label} ${esc(p.content)}</div><div class="date">${date} · 置信度: ${p.confidence}</div>`;
+    container.appendChild(div);
+  });
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── Init ──
+populateAgentList();
+loadDashboard();
+
+// Refresh periodically
+setInterval(loadDashboard, 30000);
+</script>
+</body>
+</html>

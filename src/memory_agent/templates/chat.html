@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemoryAgent</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface2: #1a2332;
+    --border: #334155;
+    --border-light: #2a3a4e;
+    --text: #e2e8f0;
+    --text-dim: #94a3b8;
+    --text-muted: #64748b;
+    --accent: #3b82f6;
+    --accent-hover: #2563eb;
+    --accent-soft: #1e3a5f;
+    --user-msg: #2563eb;
+    --agent-msg: #1e293b;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --hover: #2a3a4e;
+    --sidebar-width: 290px;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    font-size: 14px;
+  }
+
+  .sidebar {
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Agent Header ── */
+  .agent-hd {
+    padding: 12px;
+    border-bottom: 1px solid var(--border-light);
+    cursor: pointer;
+    transition: background 0.12s;
+  }
+  .agent-hd:hover { background: var(--hover); }
+  .agent-hd-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .agent-av {
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .agent-hd-info { flex: 1; min-width: 0; }
+  .agent-hd-name {
+    font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .agent-hd-name .toggle { font-size: 10px; color: var(--text-muted); }
+  .agent-hd-status { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+  .agent-hd-stats {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .agent-hd-stats .s {
+    flex: 1; text-align: center; padding: 5px 2px;
+    border-radius: 6px; background: var(--bg);
+  }
+  .agent-hd-stats .s .n { font-size: 15px; font-weight: 700; line-height: 1.2; }
+  .agent-hd-stats .s .l { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
+  .n-blue { color: var(--accent); }
+  .n-green { color: var(--green); }
+  .n-amber { color: var(--amber); }
+
+  /* ── Knowledge Clusters ── */
+  .cluster-section {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .cluster-hd {
+    padding: 4px 12px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .cluster-item {
+    padding: 5px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin: 0 4px;
+    transition: background 0.1s;
+  }
+  .cluster-item:hover { background: var(--hover); }
+  .cluster-icon { font-size: 14px; width: 20px; text-align: center; flex-shrink: 0; }
+  .cluster-name { flex: 1; font-size: 13px; }
+  .cluster-count {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--bg);
+    padding: 1px 7px;
+    border-radius: 8px;
+  }
+  .cluster-bar {
+    width: 60px; height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    overflow: hidden;
+  }
+  .cluster-bar .fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+
+  /* ── Memory Activity Stream ── */
+  .activity-section {
+    flex: 1;
+    overflow-y: auto;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .activity-section::-webkit-scrollbar { width: 3px; }
+  .activity-section::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .activity-hd {
+    padding: 6px 12px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .activity-hd button {
+    width: 20px; height: 20px; border-radius: 4px; border: none;
+    background: transparent; color: var(--text-muted); font-size: 14px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .activity-hd button:hover { background: var(--hover); color: var(--text); }
+
+  .activity-item {
+    padding: 6px 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+    border-radius: 4px;
+    margin: 0 4px 1px;
+    transition: background 0.1s;
+  }
+  .activity-item:hover { background: var(--hover); }
+  .activity-item.active { background: var(--accent-soft); }
+  .activity-emoji { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; margin-top: 1px; }
+  .activity-body { flex: 1; min-width: 0; }
+  .activity-text {
+    font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .activity-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    display: flex;
+    gap: 6px;
+  }
+  .activity-tag {
+    font-size: 9px; padding: 0 5px; border-radius: 3px;
+  }
+  .tag-preference { background: #3b82f622; color: #60a5fa; }
+  .tag-fact { background: #22c55e22; color: #4ade80; }
+  .tag-observation { background: #f59e0b22; color: #fbbf24; }
+  .tag-decision { background: #a855f722; color: #c084fc; }
+  .tag-goal { background: #06b6d422; color: #22d3ee; }
+
+  .act-del {
+    width: 18px; height: 18px; border-radius: 3px; border: none;
+    background: transparent; color: var(--text-muted); font-size: 10px;
+    cursor: pointer; opacity: 0; transition: all 0.12s;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .activity-item:hover .act-del { opacity: 1; }
+  .act-del:hover { background: #ef444433; color: var(--red); }
+
+  .activity-empty {
+    padding: 20px 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  /* ── Agent List (bottom) ── */
+  .agent-list-section {
+    max-height: 140px;
+    overflow-y: auto;
+  }
+  .agent-list-section::-webkit-scrollbar { width: 3px; }
+  .agent-list-section::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .agent-list-item {
+    padding: 5px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.1s;
+  }
+  .agent-list-item:hover { background: var(--hover); }
+  .agent-list-item.active { color: var(--accent); }
+  .agent-li-icon { font-size: 12px; width: 18px; text-align: center; flex-shrink: 0; }
+  .agent-li-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-li-count { font-size: 11px; color: var(--text-muted); }
+
+  .agent-add {
+    padding: 7px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    transition: all 0.12s;
+    border-top: 1px solid var(--border-light);
+  }
+  .agent-add:hover { color: var(--accent); background: var(--hover); }
+
+  /* ═══════ MAIN ═══════ */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  .chat-hd {
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border-light);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .chat-hd-left { display: flex; align-items: center; gap: 10px; }
+  .chat-hd h1 { font-size: 15px; font-weight: 600; }
+  .chat-hd .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 4px;
+    background: var(--bg); color: var(--text-muted);
+  }
+  .chat-hd-actions { display: flex; gap: 6px; }
+  .chat-hd-actions button {
+    padding: 5px 10px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text-dim); font-size: 12px; cursor: pointer;
+  }
+  .chat-hd-actions button:hover { background: var(--hover); color: var(--text); }
+
+  .chat-msgs {
+    flex: 1; overflow-y: auto; padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .chat-msgs::-webkit-scrollbar { width: 4px; }
+  .chat-msgs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .msg { max-width: 80%; padding: 10px 16px; border-radius: 12px; line-height: 1.6; font-size: 14px; }
+  .msg.user { align-self: flex-end; background: var(--user-msg); border-bottom-right-radius: 4px; }
+  .msg.agent { align-self: flex-start; background: var(--agent-msg); border: 1px solid var(--border-light); border-bottom-left-radius: 4px; }
+  .msg .meta { font-size: 11px; color: var(--text-muted); margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--border-light); }
+
+  .typing { align-self: flex-start; display: flex; gap: 4px; padding: 16px 20px; }
+  .typing span { width: 7px; height: 7px; background: var(--text-dim); border-radius: 50%; animation: pulse 1.4s infinite ease-in-out; }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes pulse { 0%,80%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
+  .empty-state .icon { font-size: 40px; }
+  .empty-state p { font-size: 13px; }
+  .empty-state .hint { font-size: 12px; color: var(--text-muted); }
+
+  .chat-input { padding: 12px 20px 16px; border-top: 1px solid var(--border-light); flex-shrink: 0; }
+  .input-row {
+    display: flex; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 4px;
+    transition: border-color 0.15s;
+  }
+  .input-row:focus-within { border-color: var(--accent); }
+  .chat-input input { flex: 1; padding: 10px 12px; border: none; background: transparent; color: var(--text); font-size: 14px; outline: none; }
+  .chat-input input::placeholder { color: var(--text-muted); }
+  .chat-input button { padding: 8px 18px; border-radius: 8px; border: none; background: var(--accent); color: white; font-size: 13px; cursor: pointer; transition: background 0.12s; white-space: nowrap; }
+  .chat-input button:hover { background: var(--accent-hover); }
+  .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 360px; }
+  .modal h3 { font-size: 15px; margin-bottom: 12px; }
+  .modal input { width: 100%; padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 14px; outline: none; }
+  .modal input:focus { border-color: var(--accent); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+  .modal-actions button { padding: 8px 20px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; font-size: 13px; }
+  .modal-actions .primary { background: var(--accent); color: white; border-color: var(--accent); }
+  .modal-actions .cancel { background: transparent; color: var(--text-dim); }
+  .modal-actions .cancel:hover { background: var(--hover); }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <!-- Agent Header -->
+  <div class="agent-hd" onclick="cycleAgent()">
+    <div class="agent-hd-top">
+      <div class="agent-av">🧠</div>
+      <div class="agent-hd-info">
+        <div class="agent-hd-name">
+          <span id="agent-name">加载中…</span>
+          <span class="toggle">▾</span>
+        </div>
+        <div class="agent-hd-status" id="agent-status-txt">就绪</div>
+      </div>
+    </div>
+    <div class="agent-hd-stats" id="agent-stats">
+      <div class="s"><div class="n n-blue" id="st-mem">-</div><div class="l">记忆</div></div>
+      <div class="s"><div class="n n-green" id="st-pref">-</div><div class="l">偏好</div></div>
+      <div class="s"><div class="n n-amber" id="st-risk">-</div><div class="l">衰减</div></div>
+    </div>
+  </div>
+
+  <!-- Knowledge Clusters -->
+  <div class="cluster-section" id="cluster-section">
+    <div class="cluster-hd">
+      <span>📦 知识分类</span>
+    </div>
+    <div id="cluster-list"></div>
+  </div>
+
+  <!-- Memory Activity Stream -->
+  <div class="activity-section">
+    <div class="activity-hd">
+      <span>⚡ 记忆活动</span>
+      <button onclick="newChat()" title="新对话">+</button>
+    </div>
+    <div id="activity-list"></div>
+  </div>
+
+  <!-- Agent Switcher -->
+  <div class="cluster-hd" style="padding:5px 12px;border-bottom:1px solid var(--border-light)">
+    <span>🤖 Agent / 项目</span>
+  </div>
+  <div class="agent-list-section" id="agent-list-section"></div>
+  <div class="agent-add" onclick="showNewAgentModal()">
+    <span style="font-size:16px;line-height:1">+</span> 新建项目/Agent
+  </div>
+</div>
+
+<!-- ═══════ MAIN ═══════ -->
+<div class="main">
+  <div class="chat-hd">
+    <div class="chat-hd-left">
+      <h1 id="chat-title">新对话</h1>
+      <span class="badge" id="session-badge"></span>
+    </div>
+    <div class="chat-hd-actions">
+      <button onclick="location.href='/dashboard'">📊</button>
+    </div>
+  </div>
+
+  <div class="chat-msgs" id="chat-msgs">
+    <div class="empty-state" id="empty-state">
+      <div class="icon">🧠</div>
+      <p>每次对话都在训练 Agent 的记忆</p>
+      <p class="hint">知识会积累 · 偏好会学习 · 记忆会衰减也会被强化</p>
+    </div>
+  </div>
+
+  <div class="chat-input">
+    <div class="input-row">
+      <input type="text" id="msg-input" placeholder="给 Agent 发消息…" autofocus
+             onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}">
+      <button id="send-btn" onclick="sendMsg()">发送</button>
+    </div>
+  </div>
+</div>
+
+<div id="typing" class="typing" style="display:none">
+  <span></span><span></span><span></span>
+</div>
+
+<script>
+const KEY = 'memoryagent_v2';
+
+function D() {
+  try { return JSON.parse(localStorage.getItem(KEY)) || {agents:{}, activeAgent:'', activeSession:''}; }
+  catch { return {agents:{}, activeAgent:'', activeSession:''}; }
+}
+function S(d) { localStorage.setItem(KEY, JSON.stringify(d)); }
+function id() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+
+// ── Agent Mgmt ──
+
+function ensureAgent() {
+  let d = D();
+  if (!Object.keys(d.agents).length) {
+    const aid = 'agt_' + id();
+    d.agents[aid] = { name: '默认 Agent', created: Date.now(), sessions: {} };
+    d.activeAgent = aid;
+    S(d);
+  } else if (!d.activeAgent || !d.agents[d.activeAgent]) {
+    d.activeAgent = Object.keys(d.agents)[0];
+    S(d);
+  }
+  return D();
+}
+
+function cycleAgent() {
+  const d = D();
+  const keys = Object.keys(d.agents);
+  const i = keys.indexOf(d.activeAgent);
+  d.activeAgent = keys[(i + 1) % keys.length];
+  d.activeSession = '';
+  S(d);
+  renderAll();
+}
+
+function switchAgent(id) {
+  const d = D();
+  if (!d.agents[id]) return;
+  d.activeAgent = id;
+  d.activeSession = '';
+  S(d);
+  renderAll();
+}
+
+function showNewAgentModal() {
+  const o = document.createElement('div');
+  o.className = 'modal-overlay';
+  o.innerHTML = `<div class="modal"><h3>🤖 新建项目/Agent</h3><p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">每个项目拥有独立的 Agent 记忆空间，互不干扰</p><input type="text" id="new-name" placeholder="项目名称…" autofocus><div class="modal-actions"><button class="cancel" onclick="this.closest('.modal-overlay').remove()">取消</button><button class="primary" onclick="createAgent()">创建</button></div></div>`;
+  document.body.appendChild(o);
+  document.getElementById('new-name').focus();
+  document.getElementById('new-name').onkeydown = e => { if (e.key === 'Enter') createAgent(); if (e.key === 'Escape') o.remove(); };
+}
+
+function createAgent() {
+  const name = document.getElementById('new-name').value.trim();
+  if (!name) return;
+  const d = D();
+  const aid = 'agt_' + id();
+  d.agents[aid] = { name, created: Date.now(), sessions: {} };
+  d.activeAgent = aid;
+  d.activeSession = '';
+  S(d);
+  document.querySelector('.modal-overlay')?.remove();
+  renderAll();
+}
+
+// ── Session ──
+
+function getSess() {
+  const d = D();
+  if (!d.activeAgent || !d.agents[d.activeAgent]) return null;
+  const a = d.agents[d.activeAgent];
+  if (!d.activeSession || !a.sessions[d.activeSession]) {
+    // Don't auto-create — pick the last session, or null
+    const keys = Object.keys(a.sessions);
+    if (keys.length > 0) {
+      d.activeSession = keys[keys.length - 1];
+      S(d);
+    } else {
+      return null;
+    }
+  }
+  const s = a.sessions[d.activeSession];
+  return s ? { d, agent: a, agentId: d.activeAgent, sessId: d.activeSession, sess: s } : null;
+}
+
+function newChat() {
+  const d = D();
+  if (!d.activeAgent || !d.agents[d.activeAgent]) return;
+  const a = d.agents[d.activeAgent];
+  const sid = 'ses_' + id();
+  a.sessions[sid] = { title: '新对话', created: Date.now(), msgs: [] };
+  d.activeSession = sid;
+  S(d);
+  renderAll();
+  document.getElementById('msg-input')?.focus();
+}
+
+function switchSess(id) {
+  if (id === D().activeSession) return;
+  const d = D();
+  d.activeSession = id;
+  S(d);
+  renderAll();
+}
+
+function delSess(id) {
+  if (!confirm('删除此对话？')) return;
+  const d = D();
+  if (!d.activeAgent || !d.agents[d.activeAgent]) return;
+  delete d.agents[d.activeAgent].sessions[id];
+  const keys = Object.keys(d.agents[d.activeAgent].sessions);
+  d.activeSession = keys.length > 0 ? keys[keys.length - 1] : '';
+  S(d);
+  renderAll();
+}
+
+// ── Render ──
+
+function renderAll() {
+  const d = D();
+  const aid = d.activeAgent;
+  const a = d.agents[aid];
+
+  // Agent header
+  document.getElementById('agent-name').textContent = a ? a.name : '无 Agent';
+
+  // Stats from backend
+  fetch('/status?agent_id=' + (aid || 'x')).then(r => r.json()).then(st => {
+    document.getElementById('st-mem').textContent = st.memory_count || 0;
+    document.getElementById('st-pref').textContent = st.preferences?.preferences?.length || 0;
+    document.getElementById('agent-status-txt').textContent =
+      (st.memory_count || 0) > 0 ? `🧠 ${st.memory_count} 条记忆待命` : '就绪';
+  }).catch(() => {});
+
+  fetch('/decay-analysis?agent_id=' + (aid || 'x')).then(r => r.json()).then(an => {
+    const mems = an.memories || [];
+    document.getElementById('st-risk').textContent = mems.filter(m => m.needs_refresh).length;
+    renderClusters(mems);
+  }).catch(() => {});
+
+  renderActivity();
+  renderAgentList();
+  renderMsgs();
+  updateTitle();
+}
+
+function renderClusters(memories) {
+  const types = { preference: { icon: '⭐', label: '偏好', color: '#3b82f6' },
+                  fact: { icon: '✅', label: '事实', color: '#22c55e' },
+                  goal: { icon: '🎯', label: '目标', color: '#06b6d4' },
+                  decision: { icon: '📌', label: '决策', color: '#a855f7' },
+                  observation: { icon: '📝', label: '观察', color: '#f59e0b' } };
+  const counts = {};
+  memories.forEach(m => { counts[m.memory_type] = (counts[m.memory_type] || 0) + 1; });
+  const maxCount = Math.max(1, ...Object.values(counts));
+
+  const list = document.getElementById('cluster-list');
+  list.innerHTML = Object.entries(types).map(([t, cfg]) => {
+    const c = counts[t] || 0;
+    const pct = (c / maxCount * 100) || 0;
+    return `<div class="cluster-item">
+      <div class="cluster-icon">${cfg.icon}</div>
+      <div class="cluster-name">${cfg.label}</div>
+      <div class="cluster-bar"><div class="fill" style="width:${pct}%;background:${cfg.color}"></div></div>
+      <div class="cluster-count">${c}</div>
+    </div>`;
+  }).join('');
+  if (memories.length === 0) {
+    list.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:12px">暂无记忆</div>';
+  }
+}
+
+function renderActivity() {
+  const d = D();
+  const list = document.getElementById('activity-list');
+  if (!d.activeAgent || !d.agents[d.activeAgent]) {
+    list.innerHTML = '<div class="activity-empty">创建 Agent 开始</div>';
+    return;
+  }
+  const a = d.agents[d.activeAgent];
+  const entries = Object.entries(a.sessions).sort((x, y) => (y[1].created||0) - (x[1].created||0));
+
+  if (entries.length === 0) {
+    list.innerHTML = '<div class="activity-empty">还没有对话<br>点 + 开始第一个</div>';
+    return;
+  }
+
+  list.innerHTML = entries.map(([id, s]) => {
+    const mc = (s.msgs || []).length;
+    const title = (s.title === '新对话' && s.msgs.length > 0) ? s.msgs[0].content.slice(0, 28) : s.title;
+    const agentMsgs = (s.msgs || []).filter(m => m.role === 'agent').length;
+    return `<div class="activity-item ${id === d.activeSession ? 'active' : ''}" onclick="switchSess('${id}')">
+      <div class="activity-emoji">💬</div>
+      <div class="activity-body">
+        <div class="activity-text">${esc(title || '新对话')}</div>
+        <div class="activity-meta">
+          <span>${mc} 条</span>
+          <span class="activity-tag" style="background:#22c55e22;color:#4ade80">+${agentMsgs * 2 || 1} 记忆</span>
+        </div>
+      </div>
+      <button class="act-del" onclick="event.stopPropagation();delSess('${id}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function renderAgentList() {
+  const d = D();
+  const list = document.getElementById('agent-list-section');
+  list.innerHTML = Object.entries(d.agents).map(([id, a]) =>
+    `<div class="agent-list-item ${id === d.activeAgent ? 'active' : ''}" onclick="switchAgent('${id}')">
+      <div class="agent-li-icon">🧠</div>
+      <div class="agent-li-name">${esc(a.name)}</div>
+      <div class="agent-li-count">${Object.keys(a.sessions||{}).length}</div>
+    </div>`
+  ).join('');
+}
+
+function renderMsgs() {
+  const container = document.getElementById('chat-msgs');
+  const emp = document.getElementById('empty-state');
+  container.innerHTML = '';
+
+  const r = getSess();
+  if (!r || !r.sess || !r.sess.msgs || !r.sess.msgs.length) {
+    container.appendChild(emp);
+    return;
+  }
+  r.sess.msgs.forEach(m => {
+    const d = document.createElement('div');
+    d.className = 'msg ' + m.role;
+    d.textContent = m.content;
+    if (m.meta) {
+      const x = document.createElement('div');
+      x.className = 'meta';
+      x.textContent = m.meta;
+      d.appendChild(x);
+    }
+    container.appendChild(d);
+  });
+  scrollB();
+}
+
+function scrollB() {
+  document.getElementById('chat-msgs').scrollTop = 999999;
+}
+
+function updateTitle() {
+  const d = D();
+  const s = d.agents[d.activeAgent]?.sessions?.[d.activeSession];
+  document.getElementById('chat-title').textContent = s
+    ? (s.msgs.length > 0 ? s.msgs[0].content.slice(0, 30) + (s.msgs[0].content.length > 30 ? '…' : '') : '新对话')
+    : 'MemoryAgent';
+  document.getElementById('session-badge').textContent = d.activeAgent ? d.activeAgent.slice(0, 8) + '…' : '';
+}
+
+// ── Send ──
+
+function sendMsg() {
+  const inp = document.getElementById('msg-input');
+  const text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  document.getElementById('send-btn').disabled = true;
+
+  let r = getSess();
+  if (!r) {
+    // Auto-create a session if none exists
+    newChat();
+    r = getSess();
+    if (!r) { document.getElementById('send-btn').disabled = false; return; }
+  }
+
+  r.sess.msgs.push({role: 'user', content: text, time: Date.now()});
+  if (r.sess.title === '新对话' && r.sess.msgs.length === 1) r.sess.title = text.slice(0, 40);
+  if (!r.sess.created) r.sess.created = Date.now();
+  S(r.d);
+
+  renderActivity();
+  updateTitle();
+  document.getElementById('empty-state')?.remove();
+  const ud = document.createElement('div');
+  ud.className = 'msg user';
+  ud.textContent = text;
+  document.getElementById('chat-msgs').appendChild(ud);
+  scrollB();
+
+  const ty = document.getElementById('typing');
+  ty.style.display = 'flex';
+  document.getElementById('chat-msgs').appendChild(ty);
+  scrollB();
+
+  fetch('/chat', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({agent_id: r.agentId, session_id: r.sessId, message: text}),
+  })
+  .then(res => {
+    if (!res.ok) throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败');
+    return res.json();
+  })
+  .then(data => {
+    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+
+    const d2 = D();
+    const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
+    if (s2) {
+      s2.msgs.push({role: 'agent', content: data.reply, time: Date.now(), meta: `🧠 +${data.new_memories_stored} 记忆`});
+      S(d2);
+    }
+
+    const ad = document.createElement('div');
+    ad.className = 'msg agent';
+    ad.textContent = data.reply;
+    const m = document.createElement('div');
+    m.className = 'meta';
+    m.textContent = `📚 ${data.memories_used} 条引用 · 🧠 ${data.new_memories_stored} 条新记忆`;
+    ad.appendChild(m);
+    document.getElementById('chat-msgs').appendChild(ad);
+    scrollB();
+    renderAll();
+    document.getElementById('send-btn').disabled = false;
+  })
+  .catch(err => {
+    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+    const ed = document.createElement('div');
+    ed.className = 'msg agent';
+    ed.textContent = '❌ ' + err.message;
+    document.getElementById('chat-msgs').appendChild(ed);
+    document.getElementById('send-btn').disabled = false;
+  });
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── Init ──
+// Clean up empty sessions from previous bugs
+try {
+  const d = D();
+  Object.values(d.agents).forEach(a => {
+    Object.keys(a.sessions).forEach(k => {
+      if (!a.sessions[k].msgs || a.sessions[k].msgs.length === 0) {
+        delete a.sessions[k];
+      }
+    });
+  });
+  const keys = Object.keys(d.agents[d.activeAgent]?.sessions || {});
+  if (!d.activeSession || !d.agents[d.activeAgent]?.sessions?.[d.activeSession]) {
+    d.activeSession = keys.length > 0 ? keys[keys.length - 1] : '';
+  }
+  S(d);
+} catch(e) {}
+ensureAgent();
+renderAll();
+</script>
+</body>
+</html>

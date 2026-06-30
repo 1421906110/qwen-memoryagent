@@ -1,0 +1,12 @@
+[project]
+name = "qwen-memoryagent"
+version = "0.1.0"
+description = "MemoryAgent for QwenCloud Global AI Hackathon — Persistent memory layer with Ebbinghaus decay, conflict resolution, and cross-session learning"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "fastapi>=0.100",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "numpy",
+]
