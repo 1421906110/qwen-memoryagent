@@ -1,735 +1,512 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="notranslate" translate="no">
 <head>
 <meta charset="UTF-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MemoryAgent — 记忆仪表盘</title>
+<title>仪表盘 · MemoryAgent</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {
-    --bg: #0f172a;
-    --surface: #1e293b;
-    --surface2: #1a2332;
-    --border: #334155;
-    --text: #e2e8f0;
-    --text-dim: #94a3b8;
-    --text-muted: #64748b;
+    --bg: #0b1120;
+    --surface: #131c31;
+    --surface2: #182340;
+    --border: #1e2d4a;
+    --text: #e8edf5;
+    --text-dim: #8899b4;
+    --text-muted: #5a6d85;
     --accent: #3b82f6;
-    --accent-hover: #2563eb;
-    --accent-soft: #1e3a5f;
     --green: #22c55e;
-    --amber: #f59e0b;
+    --orange: #f59e0b;
     --red: #ef4444;
-    --purple: #a855f7;
-    --cyan: #06b6d4;
-    --radius: 8px;
+    --pref: #3b82f6; --fact: #22c55e; --goal: #06b6d4;
+    --decision: #a855f7; --obs: #f59e0b; --action: #a78bfa;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    padding: 20px 24px 40px;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, 'Inter', 'Segoe UI', sans-serif;
+    min-height: 100vh;
   }
 
-  /* ── Header ── */
-  .header {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-bottom: 20px; padding-bottom: 14px;
+  /* ── Navigation ── */
+  .nav {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 32px; background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
-  .header h1 { font-size: 22px; font-weight: 600; }
-  .header-right { display: flex; align-items: center; gap: 12px; }
-  .header-right select {
-    padding: 6px 12px; border-radius: var(--radius);
-    border: 1px solid var(--border); background: var(--surface);
-    color: var(--text); font-size: 13px; cursor: pointer;
-    max-width: 200px;
+  .nav h1 { font-size: 18px; font-weight: 600; }
+  .nav h1 span { color: var(--accent); }
+  .nav .spacer { flex: 1; }
+  .nav select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 12px; font-size: 13px;
+    outline: none; cursor: pointer;
   }
-  .header-right select:focus { border-color: var(--accent); outline: none; }
-  .header-right a {
-    padding: 7px 16px; border-radius: var(--radius);
-    background: var(--accent); color: white; text-decoration: none;
-    font-size: 13px; transition: background 0.12s;
+  .nav .links { display: flex; gap: 8px; }
+  .nav .links a {
+    color: var(--text-dim); text-decoration: none; font-size: 13px;
+    padding: 4px 10px; border-radius: 6px; transition: 0.2s;
   }
-  .header-right a:hover { background: var(--accent-hover); }
+  .nav .links a:hover { color: var(--text); background: var(--surface2); }
+  .nav .links a.active { color: var(--accent); background: var(--surface2); }
 
-  /* ── Stats Cards Row ── */
-  .stats-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 12px; margin-bottom: 20px;
-  }
-  .stat-card {
-    background: var(--surface); border-radius: 10px; padding: 16px;
-    border: 1px solid var(--border); text-align: center;
-  }
-  .stat-card .num { font-size: 28px; font-weight: 700; line-height: 1.2; }
-  .stat-card .label { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
-  .num-blue { color: var(--accent); }
-  .num-green { color: var(--green); }
-  .num-amber { color: var(--amber); }
-  .num-red { color: var(--red); }
-  .num-purple { color: var(--purple); }
-  .num-cyan { color: var(--cyan); }
+  /* ── Content ── */
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
 
-  /* ── Cards Grid ── */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 14px; margin-bottom: 20px;
+  /* ── Metric Cards ── */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .metric {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 24px;
   }
+  .metric .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .metric .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .metric .value.green { color: var(--green); }
+  .metric .value.orange { color: var(--orange); }
+  .metric .value.accent { color: var(--accent); }
+  .metric .value.red { color: var(--red); }
+
+  /* ── Main Grid ── */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+
   .card {
-    background: var(--surface); border-radius: 12px; padding: 18px;
-    border: 1px solid var(--border);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 24px;
   }
-  .card.span-2 { grid-column: span 2; }
-  .card h3 {
-    font-size: 13px; font-weight: 600; color: var(--text-dim);
-    margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.3px;
-  }
-  .chart-container { position: relative; height: 200px; }
-  .chart-container.tall { height: 260px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-dim); }
+  .card .chart-wrap { position: relative; height: 200px; }
+  .card.span-2 { grid-column: 1 / -1; }
+  .card .chart-wrap.tall { height: 260px; }
 
-  /* ── Network Graph ── */
-  #network-canvas {
-    width: 100%; height: 300px;
-    border-radius: var(--radius);
-    cursor: grab;
+  /* ── Type Classification ── */
+  .type-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
   }
-  #network-canvas:active { cursor: grabbing; }
-  .network-legend {
-    display: flex; gap: 14px; flex-wrap: wrap;
-    margin-top: 8px; font-size: 11px; color: var(--text-muted);
+  .type-row:last-child { border-bottom: none; }
+  .type-row .icon { width: 28px; text-align: center; }
+  .type-row .name { width: 60px; font-size: 13px; }
+  .type-row .bar-wrap { flex: 1; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }
+  .type-row .bar { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+  .type-row .count { width: 28px; text-align: right; font-size: 14px; font-weight: 600; }
+
+  /* ── Insights ── */
+  .insight {
+    display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border);
+    align-items: flex-start;
   }
-  .network-legend span { display: flex; align-items: center; gap: 4px; }
-  .network-legend .dot {
-    width: 8px; height: 8px; border-radius: 50%; display: inline-block;
-  }
+  .insight:last-child { border-bottom: none; }
+  .insight .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+  .insight .text { font-size: 13px; line-height: 1.5; color: var(--text-dim); }
+  .insight .text strong { color: var(--text); }
 
-  /* ── Memory Table ── */
-  .table-wrap { max-height: 360px; overflow-y: auto; }
-  .table-wrap::-webkit-scrollbar { width: 4px; }
-  .table-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-  .mem-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .mem-table th {
-    text-align: left; color: var(--text-muted); font-weight: 500;
-    padding: 7px 6px; border-bottom: 1px solid var(--border);
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px;
-    position: sticky; top: 0; background: var(--surface); z-index: 1;
-  }
-  .mem-table td { padding: 7px 6px; border-bottom: 1px solid var(--border-light, #1e2a3a); }
-  .mem-table tr:hover td { background: var(--bg); }
-  .mem-table .cont { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  .tag {
-    font-size: 10px; padding: 1px 6px; border-radius: 4px;
-    white-space: nowrap;
-  }
-  .tag-preference { background: #3b82f622; color: #60a5fa; }
-  .tag-fact { background: #22c55e22; color: #4ade80; }
-  .tag-observation { background: #f59e0b22; color: #fbbf24; }
-  .tag-decision { background: #a855f722; color: #c084fc; }
-  .tag-goal { background: #06b6d422; color: #22d3ee; }
-
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
-  .badge-good { background: #22c55e22; color: #4ade80; }
-  .badge-warn { background: #f59e0b22; color: #fbbf24; }
-  .badge-bad { background: #ef444422; color: #f87171; }
-
-  /* ── Preference Chain ── */
-  .pref-chain { display: flex; flex-direction: column; gap: 6px; }
-  .pref-item {
-    padding: 8px 12px; border-radius: 6px; border-left: 3px solid var(--accent);
-    background: var(--bg); font-size: 13px;
-  }
-  .pref-item .date { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
-  .pref-item .superseded { text-decoration: line-through; opacity: 0.5; }
-
+  /* ── Loading ── */
   .loading {
-    text-align: center; padding: 40px; color: var(--text-dim); font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+    height: 200px; color: var(--text-muted); font-size: 14px;
   }
-  .empty-state {
-    text-align: center; padding: 30px; color: var(--text-muted);
-    font-size: 13px; line-height: 1.6;
+  .loading::after {
+    content: ''; width: 20px; height: 20px; margin-left: 10px;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite;
   }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Network Viz (compact) ── */
+  #network-canvas { width: 100%; height: 240px; border-radius: 8px; cursor: grab; }
+  #network-canvas:active { cursor: grabbing; }
+  .net-legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; font-size: 11px; color: var(--text-muted); }
+  .net-legend .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 
   @media (max-width: 768px) {
+    .nav { padding: 12px 16px; flex-wrap: wrap; }
+    .container { padding: 16px; }
+    .metrics { grid-template-columns: repeat(2, 1fr); }
     .grid { grid-template-columns: 1fr; }
-    .card.span-2 { grid-column: span 1; }
-    .stats-row { grid-template-columns: repeat(2, 1fr); }
   }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>📊 MemoryAgent 仪表盘</h1>
-  <div class="header-right">
-    <select id="agent-select" onchange="switchAgent(this.value)"></select>
-    <a href="/chat">← 返回聊天</a>
+<div class="nav">
+  <h1>🧠 <span>仪表盘</span></h1>
+  <select id="agent-select" onchange="loadData()"></select>
+  <div class="spacer"></div>
+  <div class="links">
+    <a href="/chat">💬 聊天</a>
+    <a href="/graph">🔗 图谱</a>
+    <a href="/dashboard" class="active">📊 仪表盘</a>
   </div>
 </div>
 
-<div class="stats-row" id="stats-overview">
-  <div class="stat-card"><div class="num num-blue" id="st-mem">—</div><div class="label">总记忆</div></div>
-  <div class="stat-card"><div class="num num-green" id="st-pref">—</div><div class="label">偏好数</div></div>
-  <div class="stat-card"><div class="num num-amber" id="st-risk">—</div><div class="label">需刷新</div></div>
-  <div class="stat-card"><div class="num" id="st-avg-conf">—</div><div class="label">平均置信度</div></div>
-  <div class="stat-card"><div class="num num-purple" id="st-health">—</div><div class="label">健康分</div></div>
-  <div class="stat-card"><div class="num num-cyan" id="st-types">—</div><div class="label">记忆类型</div></div>
-</div>
+<div class="container">
+  <!-- Metrics -->
+  <div class="metrics" id="metrics">
+    <div class="metric"><div class="label">总记忆</div><div class="value accent" id="m-total">—</div><div class="sub" id="m-total-sub"></div></div>
+    <div class="metric"><div class="label">信念</div><div class="value green" id="m-prefs">—</div><div class="sub">置信度≥0.9</div></div>
+    <div class="metric"><div class="label">矛盾</div><div class="value orange" id="m-risk">—</div><div class="sub">待解决</div></div>
+    <div class="metric"><div class="label">系统健康</div><div class="value" id="m-health">—</div><div class="sub" id="m-health-sub"></div></div>
+  </div>
 
-<div class="grid">
-  <div class="card">
-    <h3>📈 置信度分布</h3>
-    <div class="chart-container" id="confidence-container">
-      <canvas id="confidence-chart"></canvas>
+  <!-- Charts -->
+  <div class="grid">
+    <div class="card">
+      <h2>📂 记忆分布</h2>
+      <div class="chart-wrap"><canvas id="type-chart"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>📈 增长趋势</h2>
+      <div class="chart-wrap"><canvas id="growth-chart"></canvas></div>
     </div>
   </div>
-  <div class="card">
-    <h3>🧩 记忆类型分布</h3>
-    <div class="chart-container" id="type-container">
-      <canvas id="type-chart"></canvas>
+
+  <!-- Bottom row -->
+  <div class="grid">
+    <div class="card">
+      <h2>🔍 关键洞察</h2>
+      <div id="insights"><div class="loading">分析中</div></div>
+    </div>
+    <div class="card">
+      <h2>🏷️ 记忆分类</h2>
+      <div id="type-classification"><div class="loading">加载中</div></div>
     </div>
   </div>
-</div>
 
-<div class="grid">
-  <div class="card span-2">
-    <h3>📈 记忆增长趋势</h3>
-    <div class="chart-container tall" id="growth-container">
-      <canvas id="growth-chart"></canvas>
+  <!-- Network graph (compact) -->
+  <div class="grid">
+    <div class="card span-2">
+      <h2>🔗 记忆网络</h2>
+      <canvas id="network-canvas"></canvas>
+      <div class="net-legend" id="net-legend"></div>
     </div>
-  </div>
-</div>
-
-<div class="grid">
-  <div class="card span-2">
-    <h3>🔗 记忆关系网络</h3>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">节点=记忆，连线=内容相似度 > 0.5</p>
-    <canvas id="network-canvas"></canvas>
-    <div class="network-legend" id="network-legend"></div>
-  </div>
-</div>
-
-<div class="grid">
-  <div class="card span-2">
-    <h3>📉 置信度衰减曲线</h3>
-    <div style="display:flex;gap:8px;margin-bottom:12px">
-      <select id="decay-memory-select" style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:13px"></select>
-      <button onclick="loadDecayTrace()" style="padding:6px 16px;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:white;cursor:pointer;font-size:12px">查看衰减</button>
-    </div>
-    <div class="chart-container tall" id="decay-container">
-      <canvas id="decay-chart"></canvas>
-    </div>
-  </div>
-</div>
-
-<div class="grid">
-  <div class="card span-2">
-    <h3>🔄 偏好演变链</h3>
-    <div id="pref-chain-container" class="pref-chain"></div>
-  </div>
-</div>
-
-<div class="card" style="margin-bottom:24px">
-  <h3>📋 记忆明细</h3>
-  <div class="table-wrap">
-    <table class="mem-table" id="memory-table">
-      <thead>
-        <tr><th>类型</th><th>内容</th><th>置信度</th><th>衰减</th><th>已过</th><th>访问</th><th>状态</th></tr>
-      </thead>
-      <tbody id="memory-tbody"></tbody>
-    </table>
   </div>
 </div>
 
 <script>
-// ── Agent sync with chat.html ──
-const STORAGE_KEY = 'memoryagent_v2';
+const STORAGE_KEY = 'memoryagent_v3';
 
-function getAgentFromStorage() {
+// ── Agent Select ──
+function getAgents() {
   try {
-    const d = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-    return d.activeAgent || '';
-  } catch { return ''; }
+    const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    const agents = [];
+    const ags = data.agents;
+    if (ags && typeof ags === 'object') {
+      for (const id of Object.keys(ags)) {
+        const a = ags[id];
+        agents.push({ id, name: (a && a.name) || id });
+      }
+    }
+    return agents.length > 0 ? agents : [{ id: 'default', name: 'default' }];
+  } catch(e) { return [{ id: 'default', name: 'default' }]; }
 }
 
-function getAllAgents() {
-  try {
-    const d = JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-    return Object.entries(d.agents || {}).map(([id, a]) => ({ id, name: a.name || id }));
-  } catch { return []; }
+function initAgentSelect() {
+  const sel = document.getElementById('agent-select');
+  const agents = getAgents();
+  sel.innerHTML = agents.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+  const saved = localStorage.getItem('memoryagent_current_agent');
+  if (saved && agents.some(a => a.id === saved)) sel.value = saved;
+
+  // Fallback: load from API if localStorage empty
+  if (agents.length <= 1 && agents[0]?.id === 'default') {
+    fetch('/agents').then(r => r.json()).then(data => {
+      if (data.agents && data.agents.length > 0) {
+        sel.innerHTML = data.agents.map(a =>
+          `<option value="${a.id}">${a.id}</option>`
+        ).join('');
+        loadData();
+      }
+    }).catch(() => {});
+  }
 }
 
-let currentAgent = getAgentFromStorage() || 'web-demo-agent';
-let allMemories = [];
-let confidenceChart = null;
-let decayChart = null;
+// ── Type config ──
+const TYPES = [
+  { key: 'preference', icon: '⭐', label: '偏好', color: '#3b82f6' },
+  { key: 'fact', icon: '✅', label: '事实', color: '#22c55e' },
+  { key: 'action', icon: '🛠️', label: '行为', color: '#a78bfa' },
+  { key: 'goal', icon: '🎯', label: '目标', color: '#06b6d4' },
+  { key: 'decision', icon: '📌', label: '决策', color: '#a855f7' },
+  { key: 'observation', icon: '📝', label: '观察', color: '#f59e0b' },
+];
+
+// ── Charts ──
 let typeChart = null;
 let growthChart = null;
 let networkAnim = null;
 
-// ── Agent Switcher ──
-function populateAgentList() {
-  const select = document.getElementById('agent-select');
-  const agents = getAllAgents();
-  if (agents.length > 0) {
-    select.innerHTML = agents.map(a =>
-      `<option value="${a.id}" ${a.id === currentAgent ? 'selected' : ''}>🧠 ${a.name}</option>`
-    ).join('');
-  } else {
-    select.innerHTML = `<option value="${currentAgent}">🧠 ${currentAgent}</option>`;
-  }
-}
-
-function switchAgent(id) {
-  currentAgent = id;
-  populateAgentList();
-  loadDashboard();
-}
-
-// ── Load Dashboard ──
-function loadDashboard() {
-  Promise.all([
-    fetch('/status?agent_id=' + currentAgent).then(r => r.json()),
-    fetch('/decay-analysis?agent_id=' + currentAgent).then(r => r.json()),
-    fetch('/preferences/history?agent_id=' + currentAgent).then(r => r.json()),
-  ])
-  .then(([status, analysis, prefHistory]) => {
-    allMemories = analysis.memories || [];
-    renderStats(status, analysis);
-    drawConfidenceChart(allMemories);
-    drawTypeChart(allMemories);
-    drawGrowthChart(allMemories);
-    drawNetwork(allMemories);
-    renderTable(allMemories);
-    populateDecaySelect(allMemories);
-    renderPreferenceHistory(prefHistory.history || []);
-  })
-  .catch(e => {
-    document.querySelectorAll('.chart-container, #network-canvas, .table-wrap, .pref-chain').forEach(el => {
-      el.innerHTML = '<div class="empty-state">⚠️ 加载失败，请刷新重试</div>';
-    });
-  });
-}
-
-// ── Stats ──
-function renderStats(status, analysis) {
-  const mems = analysis.memories || [];
-  const needRefresh = mems.filter(m => m.needs_refresh).length;
-  const avgConf = mems.length
-    ? (mems.reduce((s, m) => s + (m.effective_confidence || m.confidence || 0), 0) / mems.length)
-    : 0;
-
-  document.getElementById('st-mem').textContent = status.memory_count || 0;
-  document.getElementById('st-pref').textContent = status.preferences?.preferences?.length || 0;
-  document.getElementById('st-risk').textContent = needRefresh;
-  document.getElementById('st-avg-conf').textContent = avgConf ? avgConf.toFixed(2) : '—';
-
-  // Health score: weighted combination
-  const healthScore = calcHealth(mems, needRefresh);
-  document.getElementById('st-health').textContent = healthScore;
-  document.getElementById('st-health').style.color = healthScore >= 80 ? 'var(--green)' : healthScore >= 50 ? 'var(--amber)' : 'var(--red)';
-
-  // Unique types
-  const types = new Set(mems.map(m => m.memory_type).filter(Boolean));
-  document.getElementById('st-types').textContent = types.size;
-}
-
-function calcHealth(mems, needRefresh) {
-  if (mems.length === 0) return 100;
-  const avgConf = mems.reduce((s, m) => s + (m.effective_confidence || m.confidence || 0), 0) / mems.length;
-  const refreshPenalty = (needRefresh / mems.length) * 50;
-  const confScore = avgConf * 80;
-  const accessScore = Math.min(20, mems.reduce((s, m) => s + Math.min(5, m.access_count || 0), 0) / mems.length * 5);
-  return Math.round(Math.max(0, Math.min(100, confScore + accessScore - refreshPenalty)));
-}
-
-// ── Confidence Chart (bar by type) ──
-function drawConfidenceChart(memories) {
-  const ctx = document.getElementById('confidence-chart').getContext('2d');
-  if (confidenceChart) confidenceChart.destroy();
-
-  const byType = {};
-  memories.forEach(m => {
-    const t = m.memory_type || 'unknown';
-    if (!byType[t]) byType[t] = [];
-    byType[t].push(m.effective_confidence || m.confidence || 0);
-  });
-  const labels = Object.keys(byType);
-  const data = labels.map(t => byType[t].reduce((a, b) => a + b, 0) / byType[t].length);
-  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4'];
-
-  if (labels.length === 0) {
-    document.getElementById('confidence-container').innerHTML = '<div class="empty-state">暂无记忆数据</div>';
-    return;
-  }
-
-  confidenceChart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: labels.map(l => ({preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'}[l]||l)),
-      datasets: [{
-        data: data,
-        backgroundColor: colors.slice(0, labels.length).map(c => c + '66'),
-        borderColor: colors.slice(0, labels.length),
-        borderWidth: 1,
-        borderRadius: 4,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        y: { beginAtZero: true, max: 1, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
-        x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
-      }
-    }
-  });
-}
-
-// ── Type Distribution (doughnut) ──
-function drawTypeChart(memories) {
+function renderTypeChart(counts) {
   const ctx = document.getElementById('type-chart').getContext('2d');
   if (typeChart) typeChart.destroy();
-
-  const counts = {};
-  memories.forEach(m => {
-    const t = m.memory_type || 'unknown';
-    counts[t] = (counts[t] || 0) + 1;
-  });
-  const labels = Object.keys(counts);
-  const data = Object.values(counts);
-  const labelMap = {preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'};
-  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#06b6d4'];
-
-  if (labels.length === 0) {
-    document.getElementById('type-container').innerHTML = '<div class="empty-state">暂无数据</div>';
-    return;
-  }
-
+  const data = TYPES.map(t => ({ label: t.label, count: counts[t.key] || 0, color: t.color }));
   typeChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
-      labels: labels.map(l => labelMap[l] || l),
-      datasets: [{
-        data: data,
-        backgroundColor: colors.slice(0, labels.length),
-        borderWidth: 0,
-        hoverOffset: 8,
-      }]
+      labels: data.map(d => d.label),
+      datasets: [{ data: data.map(d => d.count), backgroundColor: data.map(d => d.color), borderWidth: 0 }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      cutout: '55%',
+      cutout: '70%',
       plugins: {
         legend: {
-          position: 'bottom',
-          labels: { color: '#94a3b8', padding: 12, font: { size: 11 }, usePointStyle: true, pointStyle: 'circle' }
-        }
-      }
-    }
+          position: 'bottom', labels: { color: '#94a3b8', padding: 12, font: { size: 11 } },
+        },
+      },
+    },
   });
 }
 
-// ── Growth Chart ──
-function drawGrowthChart(memories) {
+function renderGrowthChart(memories) {
   const ctx = document.getElementById('growth-chart').getContext('2d');
   if (growthChart) growthChart.destroy();
 
-  if (memories.length === 0) {
-    document.getElementById('growth-container').innerHTML = '<div class="empty-state">暂无记忆数据，开始对话后会显示增长趋势</div>';
+  // Sort by created_at, build cumulative
+  const sorted = [...memories].filter(m => m.created_at > 0).sort((a, b) => a.created_at - b.created_at);
+  if (sorted.length === 0) {
+    document.getElementById('growth-chart').parentElement.innerHTML = '<div class="loading">暂无时间数据</div>';
     return;
   }
-
-  // Group by date
-  const byDate = {};
-  memories.forEach(m => {
-    const ts = m.created_at || m.updated_at;
-    if (!ts) return;
-    const d = new Date(ts * 1000).toISOString().slice(0, 10);
-    byDate[d] = (byDate[d] || 0) + 1;
+  const dateCounts = {};
+  sorted.forEach(m => {
+    const d = new Date(m.created_at * 1000).toISOString().slice(0, 10);
+    dateCounts[d] = (dateCounts[d] || 0) + 1;
   });
-  const dates = Object.keys(byDate).sort();
-  if (dates.length === 0) {
-    document.getElementById('growth-container').innerHTML = '<div class="empty-state">暂无时间数据</div>';
-    return;
-  }
-
-  // Cumulative
+  const dates = Object.keys(dateCounts).sort();
   let cum = 0;
-  const cumData = dates.map(d => { cum += byDate[d]; return cum; });
+  const values = dates.map(d => { cum += dateCounts[d]; return cum; });
 
   growthChart = new Chart(ctx, {
     type: 'line',
     data: {
       labels: dates.map(d => d.slice(5)),
       datasets: [{
-        label: '记忆累积',
-        data: cumData,
-        borderColor: '#3b82f6',
-        backgroundColor: '#3b82f622',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 3,
-        pointBackgroundColor: '#3b82f6',
-      }]
+        label: '累积记忆', data: values,
+        borderColor: '#3b82f6', backgroundColor: '#3b82f633',
+        fill: true, tension: 0.3, pointRadius: 2,
+      }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
-      },
+      plugins: { legend: { display: false } },
       scales: {
-        y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8', stepSize: 1 } },
-        x: { grid: { display: false }, ticks: { color: '#94a3b8', maxTicksLimit: 12 } }
-      }
-    }
+        x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e2d4a' } },
+        y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e2d4a' }, beginAtZero: true },
+      },
+    },
   });
 }
 
-// ── Network Graph ──
-function drawNetwork(memories) {
-  const canvas = document.getElementById('network-canvas');
-  const container = canvas.parentElement;
-  const rect = container.getBoundingClientRect();
-  canvas.width = rect.width - 36;
-  canvas.height = 300;
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width, H = canvas.height;
+// ── Type Classification ──
+function renderTypeClassification(counts, total) {
+  const el = document.getElementById('type-classification');
+  const maxCount = Math.max(1, ...Object.values(counts));
+  el.innerHTML = TYPES.map(t => {
+    const c = counts[t.key] || 0;
+    const pct = total > 0 ? (c / total * 100).toFixed(0) : 0;
+    return `<div class="type-row">
+      <span class="icon">${t.icon}</span>
+      <span class="name">${t.label}</span>
+      <div class="bar-wrap"><div class="bar" style="width:${c / maxCount * 100}%;background:${t.color}"></div></div>
+      <span class="count">${c}</span>
+      <span style="font-size:11px;color:var(--text-muted);width:32px;text-align:right">${pct}%</span>
+    </div>`;
+  }).join('');
+  if (Object.keys(counts).length === 0) {
+    el.innerHTML = '<div style="padding:20px 0;color:var(--text-muted);font-size:13px;text-align:center">暂无记忆</div>';
+  }
+}
 
-  if (memories.length < 2) {
-    ctx.fillStyle = '#64748b'; ctx.font = '14px sans-serif';
-    ctx.textAlign = 'center'; ctx.fillText('需要至少2条记忆才能生成关系网络', W/2, H/2);
-    document.getElementById('network-legend').innerHTML = '';
+// ── Insights ──
+function renderInsights(memories, counts) {
+  const el = document.getElementById('insights');
+  const total = memories.length;
+  const insights = [];
+
+  if (total === 0) {
+    el.innerHTML = '<div style="padding:20px 0;color:var(--text-muted);font-size:13px;text-align:center">暂无记忆数据，去聊天页面发消息吧</div>';
     return;
   }
 
-  const nodes = memories.slice(0, 30).map((m, i) => ({
+  // Most common type
+  const maxType = TYPES.reduce((a, b) => (counts[a.key] || 0) > (counts[b.key] || 0) ? a : b);
+  insights.push({ color: maxType.color, text: `<strong>${maxType.label}</strong> 是最多的记忆类型，占 ${total > 0 ? (counts[maxType.key]/total*100).toFixed(0) : 0}%` });
+
+  // Recent memory
+  const sorted = [...memories].filter(m => m.created_at > 0).sort((a, b) => b.created_at - a.created_at);
+  const recent = sorted[0];
+  if (recent) {
+    const days = Math.floor((Date.now()/1000 - recent.created_at) / 86400);
+    insights.push({ color: '#3b82f6', text: `最新的记忆是 <strong>${days === 0 ? '今天' : days + '天前'}</strong>：${recent.content.slice(0, 50)}${recent.content.length > 50 ? '…' : ''}` });
+  }
+
+  // Risk count
+  const riskCount = memories.filter(m => (m.confidence || 0) < 0.3).length;
+  if (riskCount > 0) {
+    insights.push({ color: '#f59e0b', text: `<strong>${riskCount} 条</strong>记忆置信度偏低，建议运行归纳整理` });
+  } else if (total > 0) {
+    insights.push({ color: '#22c55e', text: `<strong>所有记忆状态良好</strong>，无需维护` });
+  }
+
+  el.innerHTML = insights.map(i =>
+    `<div class="insight"><span class="dot" style="background:${i.color}"></span><div class="text">${i.text}</div></div>`
+  ).join('');
+}
+
+// ── Network Graph (compact) ──
+function drawNetwork(memories) {
+  const canvas = document.getElementById('network-canvas');
+  const ctx = canvas.getContext('2d');
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth - 48;
+  canvas.height = 240;
+  const W = canvas.width, H = canvas.height;
+
+  if (networkAnim) cancelAnimationFrame(networkAnim);
+
+  if (memories.length < 2) {
+    ctx.fillStyle = '#64748b'; ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText('需要至少2条记忆', W/2, H/2);
+    document.getElementById('net-legend').innerHTML = '';
+    return;
+  }
+
+  const nodes = memories.slice(0, 25).map((m, i) => ({
     id: m.id, content: m.content, type: m.memory_type || 'observation',
-    confidence: m.effective_confidence || m.confidence || 0.5,
-    x: Math.random() * W, y: Math.random() * H,
-    vx: 0, vy: 0
+    conf: m.confidence || 0.5,
+    x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0
   }));
 
-  // Compute edges by tag/content similarity
   const edges = [];
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
-      let sim = 0;
-      // Same type bonus
-      if (nodes[i].type === nodes[j].type) sim += 0.3;
-      // Content word overlap
-      const words1 = new Set(nodes[i].content.toLowerCase().split(/\s+/));
-      const words2 = new Set(nodes[j].content.toLowerCase().split(/\s+/));
-      const inter = new Set([...words1].filter(w => words2.has(w) && w.length > 1));
-      if (words1.size + words2.size > 0) {
-        sim += (inter.size * 2) / (words1.size + words2.size) * 0.7;
-      }
+      let sim = nodes[i].type === nodes[j].type ? 0.3 : 0;
+      const w1 = new Set(nodes[i].content.toLowerCase().split(/\s+/));
+      const w2 = new Set(nodes[j].content.toLowerCase().split(/\s+/));
+      const inter = [...w1].filter(w => w2.has(w) && w.length > 1);
+      if (w1.size + w2.size > 0) sim += (inter.length * 2) / (w1.size + w2.size) * 0.7;
       if (sim > 0.3) edges.push({ from: i, to: j, strength: sim });
     }
   }
 
   if (edges.length === 0) {
-    document.getElementById('network-legend').innerHTML = '<span style="color:var(--text-muted)">记忆间暂无明显关联</span>';
     ctx.fillStyle = '#64748b'; ctx.font = '14px sans-serif';
     ctx.textAlign = 'center'; ctx.fillText('记忆间暂无明显关联', W/2, H/2);
+    document.getElementById('net-legend').innerHTML = '<span>记忆间暂无明显关联</span>';
     return;
   }
 
-  // Legend
-  const typeColors = { preference:'#3b82f6', fact:'#22c55e', goal:'#06b6d4', decision:'#a855f7', observation:'#f59e0b' };
-  const typeNames = { preference:'偏好', fact:'事实', goal:'目标', decision:'决策', observation:'观察' };
+  const typeColors = { preference:'#3b82f6', action:'#a78bfa', fact:'#22c55e', goal:'#06b6d4', decision:'#a855f7', observation:'#f59e0b' };
+  const typeNames = { preference:'偏好', action:'行为', fact:'事实', goal:'目标', decision:'决策', observation:'观察' };
   const types = [...new Set(nodes.map(n => n.type))];
-  document.getElementById('network-legend').innerHTML = types.map(t =>
+  document.getElementById('net-legend').innerHTML = types.map(t =>
     `<span><span class="dot" style="background:${typeColors[t]||'#94a3b8'}"></span> ${typeNames[t]||t}</span>`
   ).join('') + `<span style="margin-left:auto;font-size:10px">${nodes.length}节点 · ${edges.length}连线</span>`;
 
-  // Force simulation
-  if (networkAnim) cancelAnimationFrame(networkAnim);
-
   function simulate() {
-    // Repulsion between all nodes
     for (const n of nodes) { n.fx = 0; n.fy = 0; }
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
-        const dx = nodes[j].x - nodes[i].x;
-        const dy = nodes[j].y - nodes[i].y;
+        const dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
         const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        const force = 800 / (dist * dist);
-        nodes[i].fx -= force * dx / dist;
-        nodes[i].fy -= force * dy / dist;
-        nodes[j].fx += force * dx / dist;
-        nodes[j].fy += force * dy / dist;
+        const force = 600 / (dist * dist + 1);
+        nodes[i].fx -= force * dx / dist; nodes[i].fy -= force * dy / dist;
+        nodes[j].fx += force * dx / dist; nodes[j].fy += force * dy / dist;
       }
     }
-    // Attraction along edges
     for (const e of edges) {
       const a = nodes[e.from], b = nodes[e.to];
       const dx = b.x - a.x, dy = b.y - a.y;
       const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-      const force = dist * e.strength * 0.01;
-      a.fx += force * dx / dist;
-      a.fy += force * dy / dist;
-      b.fx -= force * dx / dist;
-      b.fy -= force * dy / dist;
+      const force = dist * e.strength * 0.008;
+      a.fx += force * dx / dist; a.fy += force * dy / dist;
+      b.fx -= force * dx / dist; b.fy -= force * dy / dist;
     }
-    // Center gravity
+    for (const n of nodes) { n.fx += (W/2 - n.x) * 0.002; n.fy += (H/2 - n.y) * 0.002; }
     for (const n of nodes) {
-      n.fx += (W/2 - n.x) * 0.002;
-      n.fy += (H/2 - n.y) * 0.002;
-    }
-    // Apply
-    for (const n of nodes) {
-      n.vx = (n.vx + n.fx) * 0.85;
-      n.vy = (n.vy + n.fy) * 0.85;
+      n.vx = (n.vx + n.fx) * 0.85; n.vy = (n.vy + n.fy) * 0.85;
       n.x += n.vx; n.y += n.vy;
-      n.x = Math.max(10, Math.min(W-10, n.x));
-      n.y = Math.max(10, Math.min(H-10, n.y));
+      n.x = Math.max(5, Math.min(W-5, n.x)); n.y = Math.max(5, Math.min(H-5, n.y));
     }
 
-    // Render
     ctx.clearRect(0, 0, W, H);
-    // Edges
     for (const e of edges) {
-      ctx.beginPath();
-      ctx.moveTo(nodes[e.from].x, nodes[e.from].y);
+      ctx.beginPath(); ctx.moveTo(nodes[e.from].x, nodes[e.from].y);
       ctx.lineTo(nodes[e.to].x, nodes[e.to].y);
-      ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.4})`;
-      ctx.lineWidth = e.strength * 2;
-      ctx.stroke();
+      ctx.strokeStyle = `rgba(148,163,184,${e.strength*0.35})`; ctx.lineWidth = e.strength*2; ctx.stroke();
     }
-    // Nodes
     for (const n of nodes) {
-      ctx.beginPath();
-      ctx.arc(n.x, n.y, 4 + n.confidence * 4, 0, Math.PI * 2);
-      ctx.fillStyle = typeColors[n.type] || '#94a3b8';
-      ctx.fill();
-      // Label for high-confidence
-      if (n.confidence > 0.7) {
-        ctx.fillStyle = '#e2e8f0';
-        ctx.font = '9px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(n.content.slice(0, 10) + (n.content.length > 10 ? '…' : ''), n.x, n.y - 8);
-      }
+      ctx.beginPath(); ctx.arc(n.x, n.y, 3 + n.conf*4, 0, Math.PI*2);
+      ctx.fillStyle = typeColors[n.type] || '#94a3b8'; ctx.fill();
     }
-
     networkAnim = requestAnimationFrame(simulate);
   }
   simulate();
 }
 
-// ── Decay Trace ──
-function populateDecaySelect(memories) {
-  const select = document.getElementById('decay-memory-select');
-  select.innerHTML = '<option value="">选择记忆查看衰减曲线...</option>';
-  memories.forEach(m => {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.content;
-    select.appendChild(opt);
-  });
-}
+// ── Main Load ──
+async function loadData() {
+  const agentId = document.getElementById('agent-select').value;
+  if (!agentId) return;
+  localStorage.setItem('memoryagent_current_agent', agentId);
 
-function loadDecayTrace() {
-  const id = document.getElementById('decay-memory-select').value;
-  if (!id) return;
+  document.querySelectorAll('.loading').forEach(el => { if (el) el.style.display = 'flex'; });
 
-  fetch('/decay-trace/' + id + '?days=30&points=30')
-    .then(r => r.json())
-    .then(data => {
-      const ctx = document.getElementById('decay-chart').getContext('2d');
-      if (decayChart) decayChart.destroy();
+  try {
+    // Fetch stats + decay-analysis in parallel
+    const [statsResp, decayResp] = await Promise.all([
+      fetch('/stats?agent_id=' + encodeURIComponent(agentId)),
+      fetch('/decay-analysis?agent_id=' + encodeURIComponent(agentId) + '&min_confidence=0'),
+    ]);
+    const stats = await statsResp.json();
+    const decay = await decayResp.json();
+    const memories = decay.memories || [];
 
-      const labels = data.trace.map(t => '第' + (t.age_hours / 24).toFixed(1) + '天');
-      const values = data.trace.map(t => t.confidence);
+    // Count by type
+    const counts = {};
+    TYPES.forEach(t => counts[t.key] = 0);
+    memories.forEach(m => { if (m.memory_type) counts[m.memory_type] = (counts[m.memory_type] || 0) + 1; });
 
-      decayChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels, datasets: [{
-            label: '置信度',
-            data: values,
-            borderColor: '#3b82f6',
-            backgroundColor: '#3b82f633',
-            fill: true,
-            tension: 0.4,
-            pointRadius: 2,
-          }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          plugins: {
-            title: { display: true, text: `半衰期: ${data.halflife_hours}h · 初始置信度: ${data.initial_confidence}`, color: '#94a3b8', font: { size: 12 } }
-          },
-          scales: {
-            y: { beginAtZero: true, max: 1, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
-            x: { grid: { display: false }, ticks: { color: '#94a3b8', maxTicksLimit: 10 } }
-          }
-        }
-      });
-    });
-}
+    const total = stats.total_facts || memories.length || 0;
+    const core = stats.core_beliefs || 0;
+    const ct = stats.contradictions || 0;
+    const health = stats.label || '—';
+    const healthScore = stats.score || 0;
 
-// ── Memory Table ──
-function renderTable(memories) {
-  const tbody = document.getElementById('memory-tbody');
-  tbody.innerHTML = '';
-  memories.slice(0, 100).forEach(m => {
-    const tr = document.createElement('tr');
-    const statusBadge = m.needs_refresh
-      ? '<span class="badge badge-warn">⚠️ 需刷新</span>'
-      : '<span class="badge badge-good">✅ 健康</span>';
-    const age = m.age_hours < 24
-      ? Math.round(m.age_hours) + 'h'
-      : (m.age_hours / 24).toFixed(1) + 'd';
-    const conf = m.effective_confidence || m.confidence || 0;
-    tr.innerHTML = `
-      <td><span class="tag tag-${m.memory_type}">${({preference:'偏好',fact:'事实',goal:'目标',decision:'决策',observation:'观察'}[m.memory_type]||m.memory_type)}</span></td>
-      <td class="cont" title="${esc(m.content)}">${esc(m.content)}</td>
-      <td>${conf.toFixed(2)}</td>
-      <td>${m.decay_factor || '—'}</td>
-      <td>${age}</td>
-      <td>${m.access_count || 0}</td>
-      <td>${statusBadge}</td>
-    `;
-    tbody.appendChild(tr);
-  });
-  if (memories.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:30px">暂无记忆数据 — 开始对话即可自动创建记忆</td></tr>';
+    // Metrics
+    document.getElementById('m-total').textContent = total;
+    document.getElementById('m-total-sub').textContent = `共 ${TYPES.filter(t => counts[t.key] > 0).length} 种类型` || '';
+    document.getElementById('m-prefs').textContent = core;
+    document.getElementById('m-risk').textContent = ct;
+    const healthEl = document.getElementById('m-health');
+    healthEl.textContent = typeof health === 'number' ? health : (healthScore || '—');
+    healthEl.className = 'value ' + (healthScore >= 80 ? 'green' : healthScore >= 50 ? 'orange' : 'red');
+    document.getElementById('m-health-sub').textContent = stats.level === 'healthy' ? '✅ 系统健康' : (stats.level === 'warning' ? '⚠️ 需关注' : '🔴 建议维护');
+
+    // Charts
+    renderTypeChart(counts);
+    renderGrowthChart(memories);
+
+    // Classification + Insights
+    renderTypeClassification(counts, total);
+    renderInsights(memories, counts);
+
+    // Network
+    drawNetwork(memories);
+
+  } catch(e) {
+    document.getElementById('insights').innerHTML = '<div style="color:var(--red);font-size:13px">❌ 加载失败: ' + e.message + '</div>';
   }
-}
-
-// ── Preference History ──
-function renderPreferenceHistory(history) {
-  const container = document.getElementById('pref-chain-container');
-  container.innerHTML = '';
-  if (history.length === 0) {
-    container.innerHTML = '<div class="empty-state">暂无偏好数据 — 开始对话即可自动学习偏好</div>';
-    return;
-  }
-  history.forEach(p => {
-    const div = document.createElement('div');
-    div.className = 'pref-item';
-    const cls = p.is_active ? '' : 'superseded';
-    const label = p.is_active ? '<span class="badge badge-good">当前</span>' : '<span class="badge badge-bad">已过时</span>';
-    const date = new Date(p.created_at * 1000).toLocaleString('zh-CN');
-    div.innerHTML = `<div class="${cls}">${label} ${esc(p.content)}</div><div class="date">${date} · 置信度: ${p.confidence}</div>`;
-    container.appendChild(div);
-  });
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
 // ── Init ──
-populateAgentList();
-loadDashboard();
-
-// Refresh periodically
-setInterval(loadDashboard, 30000);
+initAgentSelect();
+loadData();
 </script>
 </body>
 </html>

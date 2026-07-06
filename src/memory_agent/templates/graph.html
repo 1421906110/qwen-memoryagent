@@ -1,16 +1,32 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="notranslate" translate="no">
 <head>
 <meta charset="UTF-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>记忆关系图谱 · MemoryAgent</title>
 <style>
   :root {
-    --bg: #0f172a; --card: #1e293b; --border: #334155;
-    --text: #e2e8f0; --text-muted: #94a3b8; --accent: #3b82f6;
-    --pref: #3b82f6; --fact: #22c55e; --goal: #06b6d4;
-    --decision: #a855f7; --obs: #f59e0b;
-  }
+    --bg: #eaecf0;
+    --surface: #ffffff;
+    --surface2: #f9fafb;
+    --border: #e5e7eb;
+    --text: #111827;
+    --text-dim: #6b7280;
+    --text-muted: #9ca3af;
+    --accent: #8b5cf6;
+    --accent-hover: #7c3aed;
+    --accent-soft: #8b5cf610;
+    --green: #10b981;
+    --orange: #f59e0b;
+    --red: #ef4444;
+    --pref: #8b5cf6; --fact: #10b981; --goal: #06b6d4;
+    --decision: #a78bfa; --obs: #f59e0b;
+    --radius: 8px;
+    --radius-lg: 12px;
+    --shadow: 0 1px 2px rgba(0,0,0,0.04);
+    --transition: 0.15s ease;
+}
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -20,18 +36,18 @@
   /* ── Top bar ── */
   .topbar {
     display: flex; align-items: center; gap: 12px; padding: 12px 20px;
-    background: var(--card); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    background: var(--surface2); border-bottom: 1px solid var(--border); flex-shrink: 0;
     flex-wrap: wrap;
   }
   .topbar h1 { font-size: 16px; font-weight: 600; margin-right: 8px; }
-  .topbar h1 span { color: var(--accent); }
+  .topbar h1 span { color: #07c160; }
   .topbar label { font-size: 12px; color: var(--text-muted); }
   .topbar select, .topbar input {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 4px 8px; font-size: 13px;
   }
   .topbar .stat {
-    font-size: 12px; color: var(--text-muted); margin-left: auto;
+    font-size: 12px; color: #6b7280; margin-left: auto;
     display: flex; gap: 16px;
   }
   .topbar .stat span { white-space: nowrap; }
@@ -39,7 +55,7 @@
 
   .filter-group { display: flex; align-items: center; gap: 6px; }
   .filter-group label { cursor: pointer; display: flex; align-items: center; gap: 3px; font-size: 12px; }
-  .filter-group input[type="checkbox"] { accent-color: var(--accent); }
+  .filter-group input[type="checkbox"] { accent-color: #07c160; }
 
   /* ── Canvas area ── */
   .graph-wrapper {
@@ -53,12 +69,16 @@
   /* ── Tooltip ── */
   #tooltip {
     position: absolute; display: none; pointer-events: none;
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
     padding: 10px 14px; max-width: 320px; z-index: 100;
     box-shadow: 0 4px 20px rgba(0,0,0,0.4);
   }
   #tooltip .content { font-size: 13px; line-height: 1.5; margin-bottom: 4px; }
   #tooltip .meta { font-size: 11px; color: var(--text-muted); }
+  /* ⭐ 抽象节点样式 */
+  .node-abstraction circle { stroke: #8b5cf6; stroke-width: 3px; stroke-dasharray: 6 2; }
+  .legend-abstraction { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #8b5cf6; }
+  .legend-abstraction::before { content: ''; width: 10px; height: 10px; border-radius: 50%; border: 2px dashed #8b5cf6; }
   #tooltip .meta .tag {
     display: inline-block; padding: 1px 6px; border-radius: 4px;
     font-size: 10px; margin-right: 4px;
@@ -67,7 +87,7 @@
   /* ── Detail panel ── */
   #detail-panel {
     position: absolute; right: -380px; top: 0; bottom: 0; width: 360px;
-    background: var(--card); border-left: 1px solid var(--border);
+    background: var(--surface2); border-left: 1px solid var(--border);
     transition: right 0.3s ease; overflow-y: auto; z-index: 50;
     padding: 20px;
   }
@@ -89,12 +109,12 @@
     padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px;
     cursor: pointer;
   }
-  #detail-panel .related-list li:hover { color: var(--accent); }
+  #detail-panel .related-list li:hover { color: #07c160; }
 
   /* ── Legend ── */
   .legend {
     position: absolute; bottom: 16px; left: 16px;
-    background: var(--card); border: 1px solid var(--border);
+    background: var(--surface2); border: 1px solid var(--border);
     border-radius: 8px; padding: 8px 12px; font-size: 11px; z-index: 10;
     display: flex; gap: 10px; flex-wrap: wrap;
   }
@@ -105,6 +125,8 @@
     .topbar .stat { margin-left: 0; width: 100%; justify-content: space-around; }
     #detail-panel { width: 100%; right: -100%; }
   }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -118,8 +140,13 @@
     <span>节点 <strong id="stat-nodes">0</strong></span>
     <span>连线 <strong id="stat-edges">0</strong></span>
     <span>密度 <strong id="stat-density">0</strong></span>
+    <span>🧠 <strong id="stat-abstr">0</strong></span>
   </div>
-  <button onclick="loadGraph()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">🔄 刷新</button>
+  <button onclick="loadGraph()" style="background:#07c160;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">🔄 刷新</button>
+  <div style="display:flex;gap:4px;margin-left:8px">
+    <a href="/chat" style="color:#4b5563;text-decoration:none;font-size:12px;padding:5px 12px;border-radius:6px;border:1px solid #e0e2e6;background:#f3f4f6;transition:all var(--transition)">💬 聊天</a>
+    <a href="/dashboard" style="color:#4b5563;text-decoration:none;font-size:12px;padding:5px 12px;border-radius:6px;border:1px solid #e0e2e6;background:#f3f4f6;transition:all var(--transition)">📊 仪表盘</a>
+  </div>
 </div>
 
 <div class="graph-wrapper" id="graph-wrapper">
@@ -130,19 +157,26 @@
 </div>
 
 <script>
+// ── HTML 转义（防御 XSS） ──
+function esc(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 // ── Load agents from localStorage (same key as chat) ──
-const STORAGE_KEY = 'memoryagent_v2';
+const STORAGE_KEY = 'memoryagent_v3';
 
 function getAgents() {
+  // localStorage format (same as chat.html's D()):
+  // { agents: { agt_xxx: { name:..., sessions:... } }, activeAgent: '...', activeSession: '...' }
   try {
     const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    // data is { agent_id: { sessions: {...}, agents: {...} } }
     const agents = [];
-    for (const key of Object.keys(data)) {
-      const entry = data[key];
-      if (entry && typeof entry === 'object') {
-        const name = (entry.agents && entry.agents.name) || key;
-        agents.push({ id: key, name });
+    const ags = data.agents;
+    if (ags && typeof ags === 'object') {
+      for (const id of Object.keys(ags)) {
+        const a = ags[id];
+        agents.push({ id, name: (a && a.name) || id });
       }
     }
     return agents.length > 0 ? agents : [{ id: 'default', name: 'default' }];
@@ -163,12 +197,14 @@ function initAgentSelect() {
 
 // ── Type colors ──
 const TYPE_COLORS = {
-  preference: '#3b82f6', fact: '#22c55e', goal: '#06b6d4',
+  preference: '#07c160', fact: '#22c55e', goal: '#06b6d4',
   decision: '#a855f7', observation: '#f59e0b',
+  entity: '#64748b', abstraction: '#8b5cf6',
 };
 const TYPE_NAMES = {
   preference: '偏好', fact: '事实', goal: '目标',
   decision: '决策', observation: '观察',
+  entity: '实体', abstraction: '抽象',
 };
 
 // ── State ──
@@ -176,7 +212,7 @@ let nodes = [], edges = [];
 let animId = null;
 let selectedNodeId = null;
 let hoveredNodeId = null;
-let activeTypeFilters = new Set(['preference', 'fact', 'goal', 'decision', 'observation']);
+let activeTypeFilters = new Set(['preference', 'fact', 'goal', 'decision', 'observation', 'entity', 'abstraction']);
 
 // ── Init type filters ──
 function initTypeFilters() {
@@ -184,8 +220,8 @@ function initTypeFilters() {
   container.innerHTML = '';
   for (const [type, name] of Object.entries(TYPE_NAMES)) {
     const label = document.createElement('label');
-    label.innerHTML = `<input type="checkbox" checked onchange="toggleType('${type}')" />
-      <span style="color:${TYPE_COLORS[type]}">●</span> ${name}`;
+    label.innerHTML = `<input type="checkbox" checked onchange="toggleType('${esc(type)}')" />
+      <span style="color:${esc(TYPE_COLORS[type])}">●</span> ${esc(name)}`;
     container.appendChild(label);
   }
 }
@@ -200,8 +236,8 @@ function toggleType(type) {
 let loadedAgentId = '';
 
 async function loadGraph() {
-  const agentId = document.getElementById('agent-select').value;
-  if (!agentId) return;
+  const saved = localStorage.getItem('memoryagent_current_agent');
+  const agentId = saved || 'default';
   loadedAgentId = agentId;
   localStorage.setItem('memoryagent_current_agent', agentId);
 
@@ -217,6 +253,7 @@ async function loadGraph() {
     nodes = typeNodes.map(n => ({
       id: n.id, content: n.content, type: n.memory_type,
       confidence: n.confidence,
+      encoding_level: n.encoding_level || 'raw',
       x: Math.random() * 800, y: Math.random() * 600,
       vx: 0, vy: 0, fx: 0, fy: 0,
     }));
@@ -225,12 +262,16 @@ async function loadGraph() {
       .filter(e => visibleIds.has(e.source) && visibleIds.has(e.target))
       .map(e => ({
         source: e.source, target: e.target, strength: e.strength,
+        encoding_level: e.encoding_level || 'raw',
       }));
 
-    // Stats
+    // Stats (defensive)
     document.getElementById('stat-nodes').textContent = nodes.length;
     document.getElementById('stat-edges').textContent = edges.length;
-    document.getElementById('stat-density').textContent = data.stats.density;
+    try {
+      document.getElementById('stat-density').textContent = (data.stats && data.stats.density) || 0;
+      document.getElementById('stat-abstr').textContent = (data.stats && data.stats.abstractions) || 0;
+    } catch(ex) { console.error('stats display error', ex); }
 
     // Legend
     renderLegend();
@@ -239,7 +280,9 @@ async function loadGraph() {
     resizeCanvas();
     startSimulation();
   } catch(e) {
+    console.error('Graph load error:', e);
     document.getElementById('stat-nodes').textContent = '⚠️ 加载失败';
+    document.getElementById('stat-edges').textContent = e.message ? e.message.slice(0,20) : '?';
   }
 }
 
@@ -323,6 +366,12 @@ function startSimulation() {
         n.fy += (H/2 - n.y) * 0.001;
       }
 
+      // Gentle random perturbation to keep nodes alive
+      for (const n of nodes) {
+        n.fx += (Math.random() - 0.5) * 0.15;
+        n.fy += (Math.random() - 0.5) * 0.15;
+      }
+
       // Apply velocity
       for (const n of nodes) {
         n.vx = (n.vx + n.fx) * 0.8;
@@ -342,17 +391,27 @@ function startSimulation() {
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.35})`;
-      ctx.lineWidth = e.strength * 2 + 0.5;
+      // ⭐ 抽象链接用虚线
+      if (e.encoding_level === 'abstraction') {
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = 'rgba(139,92,246,0.4)';
+        ctx.lineWidth = 1.5;
+      } else {
+        ctx.setLineDash([]);
+        ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.35})`;
+        ctx.lineWidth = e.strength * 2 + 0.5;
+      }
       ctx.stroke();
+      ctx.setLineDash([]);
     }
 
     // Nodes
     for (const n of nodes) {
-      const radius = 4 + n.confidence * 6;
+      const isAbstraction = n.encoding_level === 'abstraction';
+      const radius = isAbstraction ? 7 + n.confidence * 5 : 4 + n.confidence * 6;
       const isSelected = n.id === selectedNodeId;
       const isHovered = n.id === hoveredNodeId;
-      const color = TYPE_COLORS[n.type] || '#94a3b8';
+      const color = isAbstraction ? '#8b5cf6' : (TYPE_COLORS[n.type] || '#94a3b8');
 
       // Glow for selected
       if (isSelected) {
@@ -367,16 +426,25 @@ function startSimulation() {
       ctx.fillStyle = color;
       ctx.fill();
 
+      // ⭐ 抽象节点虚线边框
+      if (isAbstraction) {
+        ctx.setLineDash([3, 2]);
+        ctx.strokeStyle = '#8b5cf6';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
       if (isHovered || isSelected) {
         ctx.strokeStyle = '#fff';
         ctx.lineWidth = 2;
         ctx.stroke();
       }
 
-      // Label for high confidence nodes
-      if (n.confidence > 0.6 || isHovered) {
-        ctx.fillStyle = isHovered ? '#fff' : '#cbd5e1';
-        ctx.font = isHovered ? 'bold 10px sans-serif' : '9px sans-serif';
+      // Label
+      if (n.confidence > 0.6 || isHovered || isAbstraction) {
+        ctx.fillStyle = isHovered ? '#fff' : (isAbstraction ? '#c4b5fd' : '#cbd5e1');
+        ctx.font = (isHovered || isAbstraction) ? 'bold 10px sans-serif' : '9px sans-serif';
         ctx.textAlign = 'center';
         const label = n.content.length > 12 ? n.content.slice(0, 12) + '…' : n.content;
         ctx.fillText(label, n.x, n.y - radius - 4);
