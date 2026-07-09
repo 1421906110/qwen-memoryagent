@@ -210,28 +210,7 @@ class TestLLMClientHelpers:
         assert estimate_tokens("hello") > 0
         assert estimate_tokens("") == 0
 
-    def test_select_memories_budget(self):
-        from memory_agent.services.llm_client import select_memories_for_context
-        memories = [
-            {"content": "a" * 100, "confidence": 0.9, "memory_type": "preference", "created_at": 1770000000},
-            {"content": "b" * 100, "confidence": 0.1, "memory_type": "observation", "created_at": 1770000000},
-        ]
-        selected = select_memories_for_context(memories, max_tokens=5000)
-        assert len(selected) >= 1
-
-    def test_select_memories_empty(self):
-        from memory_agent.services.llm_client import select_memories_for_context
-        assert select_memories_for_context([]) == []
-
-    def test_select_memories_preference_bonus(self):
-        from memory_agent.services.llm_client import select_memories_for_context
-        # Preference should get priority over observation at same confidence
-        memories = [
-            {"content": "low", "confidence": 0.5, "memory_type": "observation", "created_at": 1770000000},
-            {"content": "high", "confidence": 0.5, "memory_type": "preference", "created_at": 1770000000},
-        ]
-        selected = select_memories_for_context(memories, max_tokens=100000)
-        assert selected[0]["memory_type"] == "preference"
+    # ── select_memories_for_context 已移除（CogniMem 替代）──
 
 
 class TestMemoryMerge:

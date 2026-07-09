@@ -188,15 +188,35 @@ class SQLiteStore(MemoryStore):
         self, agent_id: str, query: str, limit: int = 10
     ) -> list[MemoryRecord]:
         """Full-text search via FTS5."""
-        sql = """
-            SELECT m.* FROM memories m
-            JOIN memories_fts fts ON m.id = fts.id
-            WHERE m.agent_id = ? AND memories_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """
-        rows = self._conn.execute(sql, (agent_id, query, limit)).fetchall()
-        return [self._row_to_memory(r) for r in rows if r]
+        # Sanitize query: FTS5 doesn't like punctuation or operators
+        sanitized = " ".join(
+            w for w in query.split()
+            if w.strip("?!,\"'.;:()[]{}")
+        )
+        if not sanitized.strip():
+            return []
+        try:
+            sql = """
+                SELECT m.* FROM memories m
+                JOIN memories_fts fts ON m.id = fts.id
+                WHERE m.agent_id = ? AND memories_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """
+            rows = self._conn.execute(
+                sql, (agent_id, sanitized, limit)
+            ).fetchall()
+            return [self._row_to_memory(r) for r in rows if r]
+        except Exception:
+            # Fallback: simple LIKE search
+            like = f"%{query.lower()}%"
+            sql = """
+                SELECT * FROM memories
+                WHERE agent_id = ? AND LOWER(content) LIKE ?
+                LIMIT ?
+            """
+            rows = self._conn.execute(sql, (agent_id, like, limit)).fetchall()
+            return [self._row_to_memory(r) for r in rows if r]
 
     def delete(self, memory_id: str) -> bool:
         c = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))

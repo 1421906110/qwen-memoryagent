@@ -578,7 +578,7 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             except Exception as e:
                 _record_api_call(success=False, error_msg=str(e))
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:80]})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:200]})}\n\n"
         else:
             logger.info("Complex task detected — using agent loop")
             try:
@@ -602,7 +602,7 @@ async def chat_stream(req: ChatRequest):
             except Exception as e:
                 _record_api_call(success=False, error_msg=str(e))
                 logger.exception("Agent chat failed")
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:80]})}\n\n"
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:200]})}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -972,6 +972,7 @@ async def memory_graph(
     threshold: float = 0.2,
 ):
     """知识图谱 — 基于 CogniMem 三元组"""
+    agent_id = _resolve_agent(agent_id)
     # Use CogniMem if available (direct integration)
     if cogni is not None:
         try:
@@ -1369,6 +1370,44 @@ async def system_health(agent_id: str = "default"):
     if config_issues:
         issues.append({"type": "config", "detail": "; ".join(config_issues), "severity": "high"})
         score -= len(config_issues) * 15
+
+    # ── 2b. DB 连接状态 ──
+    if cogni and cogni.fact_network and cogni.fact_network.db:
+        try:
+            conn = cogni.fact_network.db._get_conn()
+            conn.cursor().execute("SELECT 1")
+            cogni.fact_network.db._put_conn(conn)
+            checks["db"] = "✅"
+        except Exception as e:
+            checks["db"] = f"⚠️ {e}"
+            issues.append({"type": "db", "detail": str(e)[:60], "severity": "high"})
+            score -= 20
+    elif cogni:
+        checks["db"] = "⚠️ 无 DB 适配器"
+        score -= 10
+    else:
+        checks["db"] = "⚠️ CogniMem 未初始化"
+        score -= 20
+
+    # ── 2c. LLM 连接状态 ──
+    if llm and llm.api_key:
+        # 不实际调 API（太慢），只检查客户端初始化状态和预热记录
+        ping_ok = getattr(llm, '_warmed_up', False)
+        if ping_ok:
+            checks["llm"] = "✅"
+        else:
+            # 尝试快速预热（只做一次，后面不走这路径）
+            try:
+                llm.chat(messages=[{"role": "user", "content": "ping"}], max_tokens=3, temperature=0.1)
+                llm._warmed_up = True
+                checks["llm"] = "✅"
+            except Exception as e:
+                checks["llm"] = f"⚠️ {str(e)[:40]}"
+                issues.append({"type": "llm", "detail": str(e)[:60], "severity": "high"})
+                score -= 20
+    else:
+        checks["llm"] = "⚠️ LLM 未初始化"
+        score -= 20
 
     # ── 3. CogniMem 引擎状态 ──
     mem_issues = []

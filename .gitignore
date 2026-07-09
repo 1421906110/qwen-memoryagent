@@ -1,5 +1,6 @@
 # Environment
 .env
+.env.*
 .venv/
 venv/
 *.egg-info/
@@ -24,3 +25,15 @@ Thumbs.db
 # Runtime logs
 *.log
 nohup.out
+
+# Backups
+*.bak
+*.backup
+
+# Benchmarks
+benchmark_results.json
+benchmark.py
+
+# Old cognimem module (migrated to memory_agent/)
+src/cognimem/
+

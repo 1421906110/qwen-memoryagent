@@ -34,7 +34,7 @@ def _decay_factor(age_hours: float, access_count: int) -> float:
         # never recalled — steep decay after ~6 hours
         return max(0.0, 1.0 - (age_hours / 24.0) ** 0.7)
     # each recall strengthens memory; decay flattens with access count
-    half_life = 24.0 * (1.0 + access_count ** 0.5)  # hours
+    half_life = 24.0 * (1.0 + max(0, access_count) ** 0.5)  # hours
     return max(0.0, 2.0 ** (-age_hours / half_life))
 
 
@@ -43,9 +43,19 @@ def _semantic_similarity(a: str, b: str) -> float:
 
     A proper implementation would use embeddings, but this is sufficient
     for detecting near-duplicate or directly contradictory statements.
+
+    ⭐ 中文支持：对中文按字符切分（.split() 中文=单token，Jaccard 全0）
     """
-    set_a = set(a.lower().split())
-    set_b = set(b.lower().split())
+    def _tokenize(s: str) -> set:
+        """中英文混合分词：英文按空格，中文按单字"""
+        import re
+        tokens = set()
+        for part in re.findall(r'[a-zA-Z]+|[0-9]+|[一-鿿]', s.lower()):
+            tokens.add(part)
+        return tokens
+
+    set_a = _tokenize(a)
+    set_b = _tokenize(b)
     if not set_a or not set_b:
         return 0.0
     intersection = set_a & set_b
@@ -98,8 +108,8 @@ class MemoryService:
         if self._embed_fn:
             try:
                 memory.embedding = self._embed_fn(content)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Embedding failed for memory '%s': %s", str(content)[:50], e)
 
         # Conflict detection: check if this replaces a previous memory
         self._detect_and_resolve_conflicts(agent_id, memory)
@@ -131,8 +141,8 @@ class MemoryService:
         if not embedding and query_text and self._embed_fn:
             try:
                 embedding = self._embed_fn(query_text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Embedding failed for search query '%s': %s", str(query_text)[:50], e)
 
         memories = self.store.search(
             agent_id=agent_id,
@@ -334,7 +344,7 @@ class MemoryService:
         existing = self.store.search(
             agent_id=agent_id,
             memory_types=[new_mem.memory_type],
-            limit=5,
+            limit=20,
             min_confidence=0.3,
         )
 
@@ -618,8 +628,8 @@ class MemoryService:
         if self._embed_fn:
             try:
                 merged.embedding = self._embed_fn(merged_text)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Embedding failed during merge: %s", e)
 
         # Store merged memory
         stored_id = self.store.store(merged)

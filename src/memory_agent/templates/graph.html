@@ -187,24 +187,51 @@ function getAgents() {
 
 function initAgentSelect() {
   const sel = document.getElementById('agent-select');
-  const agents = getAgents();
-  sel.innerHTML = agents.map(a =>
+  const localAgents = getAgents();
+
+  // 先显示 localStorage agent（占位）
+  sel.innerHTML = localAgents.map(a =>
     `<option value="${a.id}">${a.name}</option>`
   ).join('');
-  const saved = localStorage.getItem('memoryagent_current_agent');
-  if (saved && agents.some(a => a.id === saved)) sel.value = saved;
+
+  // 从 API 加载（数据库里有真实数据的 Agent）
+  fetch('/agents').then(r => r.json()).then(data => {
+    if (data.agents && data.agents.length > 0) {
+      const dbAgents = data.agents.filter(a => a.fact_count > 0);
+      dbAgents.sort((a, b) => b.fact_count - a.fact_count);
+      const options = dbAgents.map(a =>
+        `<option value="${a.id}">${a.id} (${a.fact_count})</option>`
+      );
+      localAgents.forEach(a => {
+        if (!dbAgents.some(d => d.id === a.id)) {
+          options.push(`<option value="${a.id}">${a.name}</option>`);
+        }
+      });
+      sel.innerHTML = options.join('');
+      // 保留用户当前选中的 agent（可能是 localStorage agent 如 'default'）
+      const saved = localStorage.getItem('memoryagent_current_agent');
+      if (saved) {
+        const allOptions = [...dbAgents, ...localAgents];
+        if (allOptions.some(a => a.id === saved)) {
+          sel.value = saved;
+        }
+      }
+      // API 加载完成后才首次加载图谱
+      loadGraph();
+    }
+  }).catch(() => {});
 }
 
 // ── Type colors ──
 const TYPE_COLORS = {
-  preference: '#07c160', fact: '#22c55e', goal: '#06b6d4',
+  preference: '#8b5cf6', fact: '#22c55e', goal: '#06b6d4',
   decision: '#a855f7', observation: '#f59e0b',
-  entity: '#64748b', abstraction: '#8b5cf6',
+  action: '#a78bfa', entity: '#64748b', abstraction: '#8b5cf6',
 };
 const TYPE_NAMES = {
   preference: '偏好', fact: '事实', goal: '目标',
   decision: '决策', observation: '观察',
-  entity: '实体', abstraction: '抽象',
+  action: '行为', entity: '实体', abstraction: '抽象',
 };
 
 // ── State ──
@@ -212,7 +239,7 @@ let nodes = [], edges = [];
 let animId = null;
 let selectedNodeId = null;
 let hoveredNodeId = null;
-let activeTypeFilters = new Set(['preference', 'fact', 'goal', 'decision', 'observation', 'entity', 'abstraction']);
+let activeTypeFilters = new Set(['preference', 'fact', 'goal', 'decision', 'observation', 'action', 'entity', 'abstraction']);
 
 // ── Init type filters ──
 function initTypeFilters() {
@@ -236,8 +263,9 @@ function toggleType(type) {
 let loadedAgentId = '';
 
 async function loadGraph() {
-  const saved = localStorage.getItem('memoryagent_current_agent');
-  const agentId = saved || 'default';
+  const sel = document.getElementById('agent-select');
+  const agentId = sel ? sel.value : (localStorage.getItem('memoryagent_current_agent') || 'default');
+  if (!agentId) return;
   loadedAgentId = agentId;
   localStorage.setItem('memoryagent_current_agent', agentId);
 
@@ -522,7 +550,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   initAgentSelect();
   initTypeFilters();
-  loadGraph();
+  // loadGraph() 由 initAgentSelect 的 API 回调触发
 });
 
 // ── Detail panel ──
@@ -597,7 +625,7 @@ function renderLegend() {
 // ── Keyboard shortcuts ──
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDetail();
-  if (e.key === 'r' || e.key === 'R') loadGraph();
+  if (e.key === 'r' || e.key === 'R') { loadGraph(); }
 });
 </script>
 </body>

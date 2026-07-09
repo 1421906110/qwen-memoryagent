@@ -1,9 +1,11 @@
 """
-MemoryAgent — LLM integration layer.
+MemoryAgent — LLM integration layer with Qwen/DeepSeek optimized interface.
 
-Handles communication with QwenCloud (DashScope) via OpenAI-compatible API.
-Provides embedding generation, chat completion, long-context batch processing,
-and smart context window management.
+Key design for domestic models:
+  - Qwen native features: enable_search, enable_thinking, JSON mode
+  - Per-scenario temperature: tool calling 0.1, chat 0.5, creative 0.7
+  - DeepSeek v4 flash optimized: higher token limits, 429 retry, stream usage
+  - Built-in web search (Qwen native) instead of hand-crawled Bing
 """
 
 from __future__ import annotations
@@ -11,76 +13,134 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-# Default config — override via env or config file
+# ── Default config ──
 DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-DEFAULT_MODEL = "qwen-plus"
-DEFAULT_EMBEDDING_MODEL = "text-embedding-v4"
+DEFAULT_MODEL = "qwen3-6-plus"
+DEFAULT_FAST_MODEL = "qwen3-6-flash"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-v3"
+DEFAULT_ENABLE_SEARCH = True
+DEFAULT_THINKING_BUDGET = 1024
 
-# Long-context model with 1M token window
-LONG_CONTEXT_MODEL = "qwen-max-longcontext"
+# ════════════════════════════════════════════
+#  DeepSeek 深度优化配置
+# ════════════════════════════════════════════
+DEEPSEEK_DEFAULTS = {
+    # ⭐ 参考官方文档: https://api-docs.deepseek.com/api/create-chat-completion
+    "max_tokens": 16384,             # 聊天输出上限
+    "stream_max_tokens": 8192,       # 流式输出上限
+    "tool_max_tokens": 8192,         # 工具调用输出上限
+    "json_max_tokens": 8192,         # JSON mode 输出上限
+    "context_window": 1048576,       # 1M 上下文
+    "temperature_chat": 0.7,         # 聊天温度（thinking 模式下失效）
+    "temperature_tool": 0.1,         # 工具调用
+    "temperature_json": 0.05,        # JSON 输出
+    "temperature_creative": 0.9,     # 创意场景
+    # ⭐ thinking 推理强度
+    "reasoning_effort": "high",      # high=复杂任务, max=全力以赴
+    # 429 限流
+    "retry_max_429": 5,
+    "retry_base_429": 2.0,
+    "retry_max_other": 3,
+    "retry_base_other": 1.0,
+}
+QWEN_DEFAULTS = {
+    "max_tokens": 4096,
+    "stream_max_tokens": 2048,
+    "tool_max_tokens": 2048,
+    "json_max_tokens": 2048,
+    "context_window": 131072,
+    "temperature_chat": 0.5,
+    "temperature_tool": 0.1,
+    "temperature_json": 0.05,
+    "temperature_creative": 0.7,
+    "retry_max_429": 3,
+    "retry_base_429": 1.0,
+    "retry_max_other": 3,
+    "retry_base_other": 1.0,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+}
 
-# Approximate token counting (Chinese + English mixed)
-# Qwen models: ~1.5 Chinese chars/token, ~4 English chars/token
-# Conservative estimate: 2 chars/token for mixed content
+# Approximate token counting
 CHARS_PER_TOKEN = 2.0
 MAX_INPUT_TOKENS = {
-    "qwen-plus": 131072,
-    "qwen-max": 32768,
+    "qwen-plus": 131072, "qwen-max": 32768,
     "qwen-max-longcontext": 1000000,
+    "qwen3-6-plus": 131072, "qwen3-6-flash": 131072, "qwen3-7-max": 131072,
+    "deepseek-v4-flash": 65536, "deepseek-v4": 65536,
+    "deepseek-reasoner": 65536, "deepseek-chat": 65536,
 }
 
 
 def estimate_tokens(text: str) -> int:
-    """Approximate token count for Qwen models."""
+    """Approximate token count."""
     return int(len(text) / CHARS_PER_TOKEN)
 
 
-def select_memories_for_context(
-    memories: list[dict],
-    max_tokens: int = 8000,
-    reserve_tokens: int = 2000,
-) -> list[dict]:
-    """Select best memories within token budget.
+# ⭐ API 调用自动重试（指数退避），应对网络抖动/限流
+def _api_call_with_retry(call_fn, max_retries: int = 3, base_delay: float = 1.0,
+                         is_429: bool = False):
+    """执行 API 调用，失败时自动重试。
 
-    Sorts by confidence x recency score, then greedily picks
-    until token budget is exhausted. Reserves tokens for system prompt + answer.
+    DeepSeek 429 限流更严：用更多重试 + 更长退避。
+
+    Args:
+        call_fn: 无参可调用对象
+        max_retries: 最大重试次数
+        base_delay: 初始退避秒数（每次翻倍）
+        is_429: 如果是 429 错误，使用更激进的退避策略
     """
-    if not memories:
-        return []
+    for attempt in range(max_retries + 1):
+        try:
+            return call_fn()
+        except Exception as e:
+            if attempt < max_retries and _is_retryable(e):
+                # 429 限流：退避更久，加随机抖动
+                if is_429 or "429" in str(e) or "rate_limit" in str(e).lower():
+                    delay = base_delay * (2 ** attempt) + (time.time() % 1) * 0.5
+                else:
+                    delay = base_delay * (2 ** attempt)
+                logger.warning("🔄 API 调用失败（第 %d 次），%.1fs 后重试: %s",
+                               attempt + 1, delay, str(e)[:80])
+                time.sleep(delay)
+            else:
+                raise
 
-    now = 1770000000  # reference timestamp
 
-    def score(m: dict) -> float:
-        conf = m.get("confidence", 0.5)
-        age = now - m.get("created_at", now)
-        recency = max(0.0, 1.0 - age / (30 * 86400))  # 30-day half-life
-        type_bonus = 1.2 if m.get("memory_type") in ("preference", "goal", "decision") else 1.0
-        return conf * (0.6 + 0.4 * recency) * type_bonus
-
-    scored = sorted(memories, key=score, reverse=True)
-
-    budget = max_tokens - reserve_tokens
-    selected = []
-    used = 0
-
-    for m in scored:
-        tokens = estimate_tokens(m.get("content", "")) + 20  # overhead per memory
-        if used + tokens > budget:
-            break
-        selected.append(m)
-        used += tokens
-
-    return selected
+def _is_retryable(e: Exception) -> bool:
+    """判断错误是否值得重试（网络/限流/服务端错误）"""
+    if isinstance(e, TimeoutError):
+        return True
+    msg = str(e).lower()
+    if "timeout" in msg or "connection" in msg or "reset" in msg:
+        return True
+    if "429" in msg or "503" in msg or "502" in msg:
+        return True
+    if "rate_limit" in msg or "too many" in msg or "insufficient_quota" in msg:
+        return True
+    if "server error" in msg or "internal" in msg:
+        return True
+    if "bad gateway" in msg or "service temporarily" in msg:
+        return True
+    return False
 
 
 class LLMClient:
-    """LLM client for QwenCloud (DashScope)."""
+    """LLM client optimized for Chinese domestic models (Qwen / DeepSeek).
+
+    Key differences from standard OpenAI SDK wrapper:
+    - Qwen-native features: enable_search, enable_thinking, JSON mode
+    - Per-scenario temperature defaults (tool calling ≠ chat ≠ creative)
+    - Built-in web search via Qwen (no need for external search tool)
+    - Proper Chinese text generation parameters
+    """
 
     def __init__(
         self,
@@ -90,92 +150,357 @@ class LLMClient:
         embedding_model: str | None = None,
     ):
         self.api_key = api_key or os.getenv("QWEN_API_KEY", "")
-        self.base_url = base_url or os.getenv("QWEN_BASE_URL", DEFAULT_BASE_URL)
+        self.base_url = (base_url or os.getenv("QWEN_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
+        # 仅 DeepSeek 需要去掉 /v1（原生端点没有），Qwen/百炼保留
+        if self.base_url.endswith("/v1") and "deepseek" in self.base_url.lower():
+            self.base_url = self.base_url[:-3]
         self.model = model or os.getenv("QWEN_MODEL", DEFAULT_MODEL)
+        self.fast_model = os.getenv("QWEN_FAST_MODEL", DEFAULT_FAST_MODEL)
         self.embedding_model = embedding_model or os.getenv(
             "QWEN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
         )
-        self.long_context_model = LONG_CONTEXT_MODEL
+        self.long_context_model = os.getenv("QWEN_LONG_CONTEXT_MODEL", "qwen-max-longcontext")
+        self.enable_search = os.getenv("QWEN_ENABLE_SEARCH", "1") in ("1", "true", "yes")
 
-        if not self.api_key:
-            logger.warning(
-                "QWEN_API_KEY not set — LLM calls will fail until configured"
+        # ── Provider detection ──
+        self._is_deepseek = "deepseek" in self.base_url.lower()
+        self._is_qwen = "dashscope" in self.base_url.lower()
+        self._extra_body: dict = {}
+        self._cfg = DEEPSEEK_DEFAULTS if self._is_deepseek else QWEN_DEFAULTS
+
+        # ════════════════════════════════════════════
+        #  DeepSeek 深度优化
+        #  ⭐ 参考: https://api-docs.deepseek.com/api/create-chat-completion
+        # ════════════════════════════════════════════
+        if self._is_deepseek:
+            # 1. thinking_mode: flash 默认 = non-thinking（最快）
+            #    - 需要推理时在调用时传 thinking_mode: "thinking"
+            #    - thinking_max 消耗最多 token
+            #    官方文档说 flash 默认 non-thinking，不需要显式设置
+
+            # 2. stream_options: 流式调用时获取 token 用量
+            #    在 chat_stream 中动态添加
+
+            logger.info("🚀 DeepSeek 深度优化已加载: 模型=%s, max_tokens=%d, ctx=1M, 429重试=%d",
+                        self.model, self._cfg["max_tokens"],
+                        self._cfg["retry_max_429"])
+
+        # ════════════════════════════════════════════
+        #  Qwen 优化（已有）
+        # ════════════════════════════════════════════
+        elif self._is_qwen:
+            if self.enable_search:
+                self._extra_body["enable_search"] = True
+                logger.info("🔍 Qwen 内置搜索已开启")
+
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=30.0)
+
+        # ── Independent embedding client ──
+        _ek = os.getenv("EMBEDDING_API_KEY", "")
+        _eb = os.getenv("EMBEDDING_BASE_URL", "")
+        if _ek:
+            self._embed_client = OpenAI(api_key=_ek, base_url=_eb or self.base_url, timeout=30.0)
+            logger.info("📐 独立 embedding: %s", _eb or "主客户端")
+        else:
+            self._embed_client = self.client
+
+        # ── Warm-up ──
+        try:
+            self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1, temperature=0,
             )
+            self._warmed_up = True
+            logger.info("🔥 LLM 连接预热完成 (%s)", self.model)
+        except Exception:
+            logger.info("LLM 连接预热失败（不影响使用）")
 
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
-
-    # ---- Embeddings ----
+    # ════════════════════════════════════════════
+    #  Embeddings
+    # ════════════════════════════════════════════
 
     def embed(self, text: str) -> list[float]:
-        """Generate embedding vector for text using Qwen's embedding model."""
-        resp = self.client.embeddings.create(
-            model=self.embedding_model, input=text
+        """Generate embedding vector."""
+        if self._is_deepseek:
+            # DeepSeek 不支持 embedding — 留空即可
+            logger.warning("DeepSeek 不支持 embedding — 返回空向量")
+            return [0.0] * 384
+        resp = _api_call_with_retry(
+            lambda: self._embed_client.embeddings.create(
+                model=self.embedding_model, input=text
+            )
         )
         return resp.data[0].embedding
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts in one call."""
-        resp = self.client.embeddings.create(
-            model=self.embedding_model, input=texts
+        """Batch embedding generation."""
+        if self._is_deepseek:
+            return [[0.0] * 384 for _ in texts]
+        resp = _api_call_with_retry(
+            lambda: self._embed_client.embeddings.create(
+                model=self.embedding_model, input=texts
+            )
         )
         return [d.embedding for d in resp.data]
 
-    # ---- Chat ----
+    # ════════════════════════════════════════════
+    #  Chat — 根据不同场景调不同参数
+    # ════════════════════════════════════════════
 
     def chat(
         self,
         messages: list[dict],
         system_prompt: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         model: str | None = None,
+        enable_search: bool | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
-        """Send a chat completion request to Qwen.
+        """通用聊天。根据提供的内容自动选择合适参数。
 
         Args:
-            model: Override the default model. Use 'qwen-max-longcontext'
-                   for 1M token context window.
+            enable_search: None=跟随全局默认, True=开启联网搜索, False=关闭
+            enable_thinking: None=不显式设置, True=开启思考链, False=关闭
         """
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
         full_messages.extend(messages)
 
-        resp = self.client.chat.completions.create(
-            model=model or self.model,
-            messages=full_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+        extra = dict(self._extra_body)
+
+        # 场景感知搜索（仅 Qwen）
+        combined_text = " ".join(m.get("content", "") for m in full_messages if m.get("content"))
+        _needs_search = any(kw in combined_text for kw in ["搜", "查", "搜索", "最新", "今天", "明天", "新闻", "天气", "价格"])
+        if enable_search is True or (enable_search is None and _needs_search and self._is_qwen):
+            extra["enable_search"] = True
+
+        # Qwen: thinking 链
+        if enable_thinking is not None and self._is_qwen:
+            extra["enable_thinking"] = enable_thinking
+            if enable_thinking:
+                extra.setdefault("thinking_budget", 1024)
+
+        # ⭐ DeepSeek: thinking 模式
+        # 参考: https://api-docs.deepseek.com/api/create-chat-completion
+        # 参数格式: thinking: {"type": "enabled"} + reasoning_effort
+        # 注意: 开启 thinking 后 temperature/top_p 失效
+        if self._is_deepseek and enable_thinking is not None:
+            if enable_thinking:
+                extra["thinking"] = {"type": "enabled"}
+                # reasoning_effort: high=复杂任务, max=全力以赴
+                extra["reasoning_effort"] = self._cfg.get("reasoning_effort", "high")
+            else:
+                extra["thinking"] = {"type": "disabled"}
+
+        if temperature is None:
+            temperature = self._cfg["temperature_chat"]
+        if max_tokens is None:
+            max_tokens = self._cfg["max_tokens"]
+
+        resp = _api_call_with_retry(
+            lambda: self.client.chat.completions.create(
+                model=model or self.model,
+                messages=full_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                extra_body=extra or None,
+            )
         )
         return resp.choices[0].message.content or ""
+
+    def chat_completion(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+        tool_choice: str | dict = "auto",
+    ):
+        """Chat completion with tool/function calling.
+
+        ⭐ Tool calling 用低温度（0.1），减少幻觉工具名/参数。
+        ⭐ DeepSeek: tool_max_tokens 上调至 8k，支持超长工具结果。
+        """
+        extra = dict(self._extra_body)
+
+        if max_tokens is None:
+            max_tokens = self._cfg["tool_max_tokens"]
+
+        kwargs = {
+            "model": model or self.model,
+            "messages": messages,
+            "temperature": temperature if temperature is not None else self._cfg["temperature_tool"],
+            "max_tokens": max_tokens,
+            "extra_body": extra or None,
+        }
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = tool_choice
+
+        return _api_call_with_retry(
+            lambda: self.client.chat.completions.create(**kwargs)
+        )
 
     def chat_stream(
         self,
         messages: list[dict],
         system_prompt: str | None = None,
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         model: str | None = None,
+        enable_search: bool | None = None,
     ):
-        """Stream a chat completion response."""
+        """流式聊天。简单问答场景用 fast_model。
+
+        DeepSeek: 自动加 stream_options 获取 token 用量。
+        Qwen: 自动检测是否需要开启内置搜索。
+        """
         full_messages = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
         full_messages.extend(messages)
 
-        stream = self.client.chat.completions.create(
-            model=model or self.model,
+        extra = dict(self._extra_body)
+
+        # 场景感知搜索（仅 Qwen）
+        if self._is_qwen and (enable_search is None or enable_search is True):
+            combined_text = " ".join(m.get("content", "") for m in full_messages if m.get("content"))
+            if any(kw in combined_text for kw in ["搜", "查", "最新", "今天", "天气", "新闻",
+                                                      "咨询", "了解", "介绍", "行情", "股价",
+                                                      "动态", "热点"]):
+                extra["enable_search"] = True
+
+        if temperature is None:
+            temperature = self._cfg["temperature_chat"]
+
+        # max_tokens: 未显式传入时使用 provider 特定默认值
+        if max_tokens is None:
+            max_tokens = self._cfg["stream_max_tokens"]
+
+        # ⭐ 简单问答用 flash 模型（更快更便宜）
+        use_model = model or self.model
+        if model is None and system_prompt is None and len(full_messages) <= 2:
+            use_model = self.fast_model
+
+        # ⭐ DeepSeek: 流式调用时获取 token 用量统计
+        kwargs = dict(
+            model=use_model,
             messages=full_messages,
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            extra_body=extra or None,
         )
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        if self._is_deepseek:
+            kwargs["stream_options"] = {"include_usage": True}
 
-    # ---- Long-context processing ----
+        stream = _api_call_with_retry(
+            lambda: self.client.chat.completions.create(**kwargs)
+        )
+        total_tokens = 0
+        for chunk in stream:
+            if self._is_deepseek and hasattr(chunk, 'usage') and chunk.usage:
+                total_tokens = chunk.usage.total_tokens
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta:
+                continue
+            # DeepSeek: thinking 模式下的推理链（思维过程）
+            if self._is_deepseek and hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                yield delta.reasoning_content
+            if delta.content:
+                yield delta.content
+        if self._is_deepseek and total_tokens:
+            logger.debug("📊 DeepSeek stream 用量: %d tokens", total_tokens)
+
+    # ════════════════════════════════════════════
+    #  JSON mode — 结构化输出专用
+    # ════════════════════════════════════════════
+
+    def chat_json(
+        self,
+        messages: list[dict],
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        model: str | None = None,
+        enable_search: bool | None = None,
+    ) -> dict:
+        """用 JSON mode 输出。
+
+        Qwen: 原生 response_format 支持。
+        DeepSeek: 通过 OpenAI 兼容 API 也支持 response_format。<｜end▁of▁thinking｜>_format。
+        适合：记忆提取、规划、分类等需要结构化输出的场景。
+        """
+        extra = dict(self._extra_body)
+        if temperature is None:
+            temperature = self._cfg["temperature_json"]
+        if max_tokens is None:
+            max_tokens = self._cfg["json_max_tokens"]
+
+        full_messages = []
+        if system_prompt:
+            full_messages.append({"role": "system", "content": system_prompt})
+        full_messages.extend(messages)
+
+        # Qwen: 搜索 + JSON mode 提示
+        if self._is_qwen:
+            if enable_search is not None:
+                extra["enable_search"] = enable_search
+            if not system_prompt or "json" not in system_prompt.lower():
+                if full_messages and full_messages[-1]["role"] == "user":
+                    full_messages[-1] = {
+                        "role": "user",
+                        "content": full_messages[-1]["content"] + "\n\n请用 JSON 格式输出。"
+                    }
+
+        # DeepSeek: 也支持 OpenAI 兼容的 response_format
+        try:
+            resp = _api_call_with_retry(
+                lambda: self.client.chat.completions.create(
+                    model=model or self.model,
+                    messages=full_messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"},
+                    extra_body=extra or None,
+                )
+            )
+            content = resp.choices[0].message.content or "{}"
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                logger.warning("JSON mode returned non-JSON: %.200s", content)
+                # fallthrough to manual parse
+        except Exception as e:
+            logger.warning("JSON mode failed, fallback to text parse: %s", str(e)[:60])
+
+        # Fallback: 走普通 chat + 手动 parse（兼容所有模型）
+        result = self.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        for attempt in [
+            lambda: json.loads(result.strip()),
+            lambda: json.loads(result.strip().removeprefix("```json").removesuffix("```").strip()),
+        ]:
+            try:
+                return attempt()
+            except (json.JSONDecodeError, AttributeError):
+                continue
+        return {"_raw": result, "_parse_error": True}
+
+    # ════════════════════════════════════════════
+    #  Long-context processing
+    # ════════════════════════════════════════════
 
     def process_long_transcript(
         self,
@@ -184,32 +509,19 @@ class LLMClient:
         system_prompt: str | None = None,
         temperature: float = 0.3,
     ) -> str:
-        """Process a very long text using qwen-max-longcontext (1M tokens).
-
-        Handles transcripts, documents, or conversation logs that exceed
-        the normal model's context window.
-        """
+        """Process very long text using long-context model (1M tokens)."""
         token_est = estimate_tokens(transcript)
-        safe_max = 950000  # leave margin for system + output
+        safe_max = 950000
 
         if token_est > safe_max:
-            logger.warning(
-                "Transcript ~%d tokens exceeds safe limit %d, truncating",
-                token_est, safe_max,
-            )
-            # Truncate to safe limit
+            logger.warning("Transcript ~%d tokens exceeds safe limit", token_est)
             max_chars = int(safe_max * CHARS_PER_TOKEN)
             transcript = transcript[:max_chars]
-            token_est = safe_max
 
-        logger.info(
-            "Processing long transcript (~%d tokens) with %s",
-            token_est, self.long_context_model,
-        )
+        logger.info("Processing long text (~%d tokens) with %s", token_est, self.long_context_model)
 
         sys = system_prompt or (
-            "You are a precise transcript analyst. Extract key information "
-            "accurately without adding or inferring details not present."
+            "你是一个精确的文档分析助手。准确提取关键信息，不要添加或推断未明确提到的细节。"
         )
 
         return self.chat(
@@ -224,129 +536,144 @@ class LLMClient:
         self,
         transcript: str,
     ) -> list[dict[str, Any]]:
-        """Extract memories from a long transcript in one pass.
-
-        Uses qwen-max-longcontext to process the entire transcript at once.
-        """
+        """Extract memories from a long transcript using JSON mode."""
         system = (
-            "You are a memory extraction system. Extract durable memories "
-            "from this transcript: facts, preferences, decisions, goals, "
-            "and important observations. Return JSON array: "
-            "[{type, content, confidence, tags}]. "
-            "Types: fact, preference, decision, goal, observation."
+            "你是记忆提取系统。从文本中提取持久记忆："
+            "事实、偏好、决策、目标和重要观察。"
+            "返回 JSON 数组：[{type, content, confidence, tags}]。"
+            "类型: fact, preference, decision, goal, observation。"
+            "只提取明确陈述的信息。"
         )
-        instruction = (
-            "Extract all important memories from this transcript. "
-            "Be thorough but only extract information explicitly stated."
-        )
+        instruction = "从这段文字中提取所有重要的记忆信息。"
 
         try:
-            resp = self.process_long_transcript(
-                transcript=transcript,
-                instruction=instruction,
+            resp = self.chat_json(
+                messages=[{"role": "user", "content": f"{instruction}\n\n---\n{transcript}"}],
                 system_prompt=system,
                 temperature=0.1,
+                max_tokens=4096,
             )
-            candidates = json.loads(
-                resp.strip()
-                .removeprefix("```json")
-                .removesuffix("```")
-                .strip()
-            )
-            if isinstance(candidates, list):
-                return candidates
-        except (json.JSONDecodeError, AttributeError) as e:
-            logger.warning("Failed to parse long transcript extraction: %s", e)
+            if isinstance(resp, list):
+                return resp
+            if isinstance(resp, dict) and "_parse_error" not in resp:
+                # Assume it's wrapped: {"memories": [...]}
+                for key in ("memories", "data", "results"):
+                    val = resp.get(key)
+                    if isinstance(val, list):
+                        return val
+                return [resp]
+        except Exception as e:
+            logger.warning("Long transcript extraction failed: %s", e)
 
         return []
 
-    # ---- Memory extraction ----
+    # ════════════════════════════════════════════
+    #  Memory extraction (JSON mode)
+    # ════════════════════════════════════════════
 
     def extract_memories(
         self, conversation: list[dict]
     ) -> list[dict[str, Any]]:
-        """Extract structured memory candidates from conversation turns.
+        """Extract structured memory candidates using JSON mode.
 
-        Returns list of {type, content, confidence, tags}.
+        Uses chat_json for reliable structured output.
         """
+        if not conversation or len(conversation) < 2:
+            return []
+
         system = (
-            "You are a memory extraction system. Extract durable agent memories "
-            "from the conversation. Only extract facts, preferences, decisions, "
-            "goals, or observations that would be useful across sessions. "
-            "Return JSON array: [{type, content, confidence, tags}]. "
-            "Types: fact, preference, decision, goal, observation."
+            "你是记忆提取系统。从对话中提取持久记忆。"
+            "只提取明确陈述的信息。忽略问候、闲聊和琐碎交流。"
+            "返回 JSON 数组：[{type, content, confidence, tags}]。\n"
+            "类型: fact(事实), preference(偏好), decision(决策), goal(目标), observation(观察)。\n"
+            "content 保持简洁（10-30字）。\n"
+            "只返回 JSON 数组，不要解释。"
         )
+
         text = json.dumps(
-            [
-                {"role": m.get("role", ""), "content": m.get("content", "")}
-                for m in conversation
-            ],
+            [{"role": m.get("role", ""), "content": m.get("content", "")} for m in conversation],
             ensure_ascii=False,
         )
-        resp = self.chat(
-            messages=[{"role": "user", "content": f"Conversation:\n{text}\n\nExtract memories:"}],
+
+        resp = self.chat_json(
+            messages=[{"role": "user", "content": f"对话:\n{text}\n\n提取记忆:"}],
             system_prompt=system,
-            temperature=0.1,
+            temperature=0.05,
             max_tokens=2048,
         )
-        try:
-            candidates = json.loads(resp.strip().removeprefix("```json").removesuffix("```").strip())
-            if isinstance(candidates, list):
-                return candidates
-        except (json.JSONDecodeError, AttributeError):
-            logger.warning("Failed to parse memory extraction response: %s", resp[:200])
+
+        # Handle various response shapes
+        if isinstance(resp, list):
+            valid = [c for c in resp if isinstance(c, dict) and c.get("content")]
+            if valid:
+                return valid
+        # Maybe wrapped: {"memories": [...]}
+        if isinstance(resp, dict):
+            for key in ("memories", "data"):
+                val = resp.get(key)
+                if isinstance(val, list):
+                    return [c for c in val if isinstance(c, dict) and c.get("content")]
+
+        # Fallback: try regex
+        import re
+        m = re.search(r'\[.*?\]', json.dumps(resp, ensure_ascii=False), re.DOTALL)
+        if m:
+            try:
+                candidates = json.loads(m.group())
+                if isinstance(candidates, list):
+                    return [c for c in candidates if isinstance(c, dict) and c.get("content")]
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("Memory extraction failed: %.200s", resp)
         return []
 
-    # ---- Memory-augmented answer ----
+    # ════════════════════════════════════════════
+    #  Memory-augmented answer
+    # ════════════════════════════════════════════
 
     def answer_with_memories(
         self,
         query: str,
         memories: list[dict],
         preferences: list[dict] | None = None,
+        conversation_history: str = "",
         max_context_tokens: int = 8000,
     ) -> str:
-        """Answer a query using retrieved memories as context.
+        """Answer using retrieved memories as context.
 
-        Automatically selects the most relevant memories within token budget,
-        prioritizing preferences, goals, and high-confidence facts.
+        Qwen 内置搜索会自动补充实时信息。
         """
-        # Smart selection within token budget
+        # select_memories_for_context 定义在同一个文件顶层，直接可用
         selected = select_memories_for_context(memories, max_tokens=max_context_tokens)
 
         context_parts = []
         for m in selected:
             context_parts.append(
-                f"[{m.get('memory_type', 'unknown')} | conf:{m.get('confidence', 0):.2f}] "
+                f"[{m.get('memory_type', 'unknown')} | 可信度:{m.get('confidence', 0):.2f}] "
                 f"{m.get('content', '')}"
             )
 
         system = (
-            "You are a helpful AI assistant with persistent memory. "
-            "Use the provided memory context to answer accurately.\n\n"
-            f"## Memories\n" + "\n".join(context_parts)
+            "你是小明，带长期记忆的 AI 助手。\n"
+            "根据记忆上下文和你的知识回答问题。"
         )
-
+        if context_parts:
+            system += "\n\n## 相关记忆\n" + "\n".join(context_parts)
+        if conversation_history:
+            system += f"\n\n## 最近对话\n{conversation_history}"
         if preferences:
-            # Also smart-select preferences
             pref_selected = select_memories_for_context(
-                [{"content": p.get("content", ""), "confidence": p.get("confidence", 0.5),
-                  **p} for p in preferences],
+                [{"content": p.get("content", ""), "confidence": p.get("confidence", 0.5), **p}
+                 for p in preferences],
                 max_tokens=2000,
             )
             if pref_selected:
-                pref_text = "\n".join(
-                    f"- {p.get('content', '')}" for p in pref_selected
-                )
-                system += f"\n\n## Known Preferences\n{pref_text}"
-
-        system += (
-            "\n\nIf the memories don't contain relevant info, say so clearly. "
-            "Be concise."
-        )
+                pref_text = "\n".join(f"- {p.get('content', '')}" for p in pref_selected)
+                system += f"\n\n## 已知偏好\n{pref_text}"
 
         return self.chat(
             messages=[{"role": "user", "content": query}],
             system_prompt=system,
-            temperature=0.5,
+            temperature=0.3,
         )

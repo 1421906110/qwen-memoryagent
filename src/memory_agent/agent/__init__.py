@@ -1325,6 +1325,7 @@ class Agent:
 
         facts = []
         seen = set()
+        _search_stored = False  # ⭐ 同一轮对话只存第一次搜索
 
         for m in messages:
             if m["role"] == "assistant" and "tool_calls" in m:
@@ -1365,7 +1366,9 @@ class Agent:
 
                     elif name == "web_search":
                         query = args.get("query", "")
-                        if query:
+                        # 同一轮对话只存第一次搜索（中间补搜/重试跳过）
+                        if query and not _search_stored:
+                            _search_stored = True
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="搜索了",
@@ -1377,21 +1380,15 @@ class Agent:
                             )
 
                     elif name == "web_fetch":
-                        url = args.get("url", "")
-                        if url:
-                            fact = FactTriple(
-                                subject=agent_id,
-                                predicate="访问了网页",
-                                object=url[:100],
-                                agent_id=agent_id,
-                                fact_type="action",
-                                confidence=0.9,
-                                importance=0.3,
-                            )
+                        # ❌ 不存 web_fetch — 只是中间数据抓取，无记忆价值
+                        continue
 
                     elif name == "shell":
-                        cmd = args.get("command", "")
+                        cmd = args.get("command", "").strip()
+                        # ❌ 跳过数据抓取类命令（curl/wget/httpie — 只读操作，非有意义事实）
                         if cmd and len(cmd) > 10:
+                            if any(cmd.startswith(p) for p in ("curl", "wget", "httpie", "http ", "ping", "traceroute")):
+                                continue
                             short_cmd = cmd[:80]
                             fact = FactTriple(
                                 subject=agent_id,
@@ -1400,7 +1397,7 @@ class Agent:
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
-                                importance=0.4,
+                                importance=0.3,
                             )
 
                     elif name == "memory_remember":

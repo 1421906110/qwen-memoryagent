@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL (CogniMem 持久化) ──
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cognimem
+      POSTGRES_USER: cognimem
+      POSTGRES_PASSWORD: cognimem_secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cognimem -d cognimem"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── CogniMem 引擎 + UI ──
+  app:
+    build: .
+    ports:
+      - "8000:8000"   # UI
+      - "8001:8001"   # 引擎
+    environment:
+      - QWEN_API_KEY=${QWEN_API_KEY:-}
+      - QWEN_BASE_URL=${QWEN_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
+      - QWEN_MODEL=${QWEN_MODEL:-qwen-plus}
+      - COGNIMEM_DB=postgresql://cognimem:cognimem_secret@db:5432/cognimem
+      - COGNIMEM_LLM=1
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
