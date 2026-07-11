@@ -1151,17 +1151,19 @@ class Agent:
                         memory_lines.append(f"- {content}")
 
             # ★ Governance report injection (if any memory was demoted/blocked)
+            has_governance = False
             for m in memories:
                 if "__governance_report" in m:
                     memory_lines.append("")
                     memory_lines.append(m["__governance_report"])
+                    has_governance = True
                     break
 
             if memory_lines:
                 system += (
                     "\n\n## 🧠 我記得的\n"
                     "下面是我记忆中与当前对话相关的信息。自然地融入对话中，不要生硬列出來：\n"
-                    + "\n".join(memory_lines[:10])
+                    + "\n".join(memory_lines[:12])  # 12行(含governance报告)
                 )
                 if has_warnings:
                     system += (
