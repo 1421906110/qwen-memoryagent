@@ -306,6 +306,34 @@ def memory_batch_remember(texts: str, agent_id: str = "default",
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@mcp.tool(name="audit_query",
+          description="查詢審計日誌：查看記憶的創建/讀取/更新/刪除等操作歷史。受 DREAM audit ledger 啟發。")
+def audit_query(agent_id: str = "", operation: str = "",
+                limit: int = 50, since_hours: int = 0) -> str:
+    """查询审计日志"""
+    db = brain.fact_network.db if brain.fact_network else None
+    if not db or not hasattr(db, 'query_audit'):
+        return json.dumps({"status": "error", "message": "审计日志不可用"})
+    try:
+        rows = db.query_audit(agent_id=agent_id, operation=operation,
+                               limit=limit, since_hours=since_hours)
+        return json.dumps({
+            "status": "ok",
+            "count": len(rows),
+            "entries": [
+                {
+                    "time": str(r.get("created_at", ""))[:19],
+                    "operation": r.get("operation", ""),
+                    "detail": r.get("detail", ""),
+                    "caller": r.get("caller", ""),
+                }
+                for r in rows
+            ],
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 # ═══════════════════════════════════════════════════════════════
 # 启动
 # ═══════════════════════════════════════════════════════════════

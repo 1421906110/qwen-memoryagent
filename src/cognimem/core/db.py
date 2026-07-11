@@ -538,6 +538,67 @@ class DatabaseAdapter:
             """, (fact_id, agent_id, old_conf, new_conf, reason))
 
     # ═══════════════════════════════════════════
+    # 审计日志 (Audit Trail)
+    # 受 DREAM 审计日志启发。
+    # ═══════════════════════════════════════════
+
+    def log_audit(self, agent_id: str, operation: str, detail: str,
+                  fact_id: str | None = None,
+                  metadata: dict | None = None,
+                  caller: str = "system"):
+        """写入一条审计日志"""
+        try:
+            with self._plain_cursor_ctx() as cur:
+                cur.execute("""
+                    INSERT INTO audit_log
+                        (agent_id, fact_id, operation, detail, metadata, caller)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (agent_id, fact_id, operation, detail,
+                      json.dumps(metadata or {}), caller))
+        except Exception as e:
+            # 审计日志绝不能带崩主流程
+            logger.debug("Audit log write failed (non-critical): %s", e)
+
+    def query_audit(self, agent_id: str = "",
+                    operation: str = "",
+                    limit: int = 50,
+                    offset: int = 0,
+                    since_hours: int = 0) -> list[dict]:
+        """查询审计日志"""
+        conditions = []
+        params = []
+        if agent_id:
+            conditions.append("agent_id = %s")
+            params.append(agent_id)
+        if operation:
+            conditions.append("operation = %s")
+            params.append(operation)
+        if since_hours > 0:
+            conditions.append("created_at >= now() - interval '%s hours'")
+            params.append(str(since_hours))
+
+        where = " AND ".join(conditions) if conditions else "TRUE"
+        sql = f"""
+            SELECT id, agent_id, fact_id, operation, detail,
+                   metadata, caller, created_at
+            FROM audit_log
+            WHERE {where}
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        params.extend([limit, offset])
+
+        try:
+            with self._plain_cursor_ctx() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+                cols = [desc[0] for desc in cur.description]
+                return [dict(zip(cols, row)) for row in rows]
+        except Exception as e:
+            logger.debug("Audit query failed: %s", e)
+            return []
+
+    # ═══════════════════════════════════════════
     # Agent 管理
     # ═══════════════════════════════════════════
 

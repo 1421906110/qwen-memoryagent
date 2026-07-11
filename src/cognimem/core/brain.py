@@ -147,6 +147,23 @@ class CogniMem:
             r for r in results if r.get("status") == "contradiction_detected"
         ]
 
+        # ★ 审计日志（受 DREAM audit ledger 启发）
+        db = getattr(self.fact_network, 'db', None)
+        if db and hasattr(db, 'log_audit'):
+            for r in results:
+                f = r.get("fact")
+                if f:
+                    op = "create" if r.get("status") == "created" else \
+                         "update" if r.get("status") == "merged" else "contradiction"
+                    db.log_audit(
+                        agent_id=agent_id,
+                        fact_id=f.fact_id,
+                        operation=op,
+                        detail=f"存储事实: {f.subject} {f.predicate} {f.object}",
+                        metadata={"source_type": source_type, "status": r.get("status")},
+                        caller="brain.remember",
+                    )
+
         response = {
             "status": "remembered",
             "facts_added": len(facts),
@@ -302,11 +319,23 @@ class CogniMem:
     def confirm(self, fact_id: str, agent_id: str = "default") -> dict:
         """确认一个事实 → 置信度提升"""
         fact = self.fact_network.confirm_fact(fact_id, "user_confirmation")
+        # ★ 审计日志
+        if fact:
+            db = getattr(self.fact_network, 'db', None)
+            if db and hasattr(db, 'log_audit'):
+                db.log_audit(agent_id, "confirm", f"确认事实: {fact.subject} {fact.predicate} {fact.object}",
+                             fact_id=fact_id, caller="brain.confirm")
         return {"status": "confirmed" if fact else "not_found"}
 
     def challenge(self, fact_id: str, agent_id: str = "default") -> dict:
         """质疑一个事实 → 置信度降低"""
         fact = self.fact_network.challenge_fact(fact_id, "user_challenge")
+        # ★ 审计日志
+        if fact:
+            db = getattr(self.fact_network, 'db', None)
+            if db and hasattr(db, 'log_audit'):
+                db.log_audit(agent_id, "challenge", f"质疑事实: {fact.subject} {fact.predicate} {fact.object}",
+                             fact_id=fact_id, caller="brain.challenge")
         return {"status": "challenged" if fact else "not_found"}
 
     def resolve_contradiction(self, contradiction_id: str,
@@ -379,6 +408,10 @@ class CogniMem:
                 for table in tables:
                     cur.execute(f"DELETE FROM {table} WHERE agent_id = %s", (agent_id,))
                     total += cur.rowcount
+            # ★ 审计日志
+            if hasattr(db, 'log_audit'):
+                db.log_audit(agent_id, "delete", f"清除 Agent 所有记忆（{total} 行）",
+                             caller="brain.reset_agent")
             logger.info("🗑️ Reset agent '%s': %d rows deleted", agent_id, total)
             return {"deleted": total, "message": "记忆已清除"}
         except Exception as e:
@@ -387,8 +420,16 @@ class CogniMem:
 
     def consolidate(self, agent_id: str = "default") -> dict:
         """触发睡眠期记忆整合（含抽象化）"""
-        return self.fact_network.consolidate(agent_id,
-                                             llm_extractor=self.llm_extractor)
+        result = self.fact_network.consolidate(agent_id,
+                                               llm_extractor=self.llm_extractor)
+        # ★ 审计日志
+        db = getattr(self.fact_network, 'db', None)
+        if db and hasattr(db, 'log_audit'):
+            detail = (f"维护完成: 遗忘{result.get('deleted',0)}条 "
+                     f"衰减{result.get('decayed',0)}条 "
+                     f"抽象{result.get('abstracted',0)}条")
+            db.log_audit(agent_id, "consolidation", detail, caller="brain.consolidate")
+        return result
 
     def get_stats(self, agent_id: str = "default") -> dict:
         """获取统计信息"""

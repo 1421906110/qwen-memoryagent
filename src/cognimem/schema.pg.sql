@@ -142,3 +142,24 @@ CREATE TABLE fact_versions (
     changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_fv_fact ON fact_versions (fact_id, changed_at DESC);
+
+
+-- ── 审计日志表 (Audit Trail) ──
+-- 受 DREAM 审计日志启发，记录所有记忆操作的完整追踪。
+-- 每条记录：谁操作了哪条记忆、做了什么、什么时候做的。
+CREATE TABLE audit_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id TEXT NOT NULL,
+    fact_id UUID,                              -- 操作的目标事实（可选，治理操作无特定事实）
+    operation TEXT NOT NULL,                    -- create|read|update|delete|confirm|challenge|contradiction|governance|consolidation
+    detail TEXT NOT NULL,                       -- 操作详情（自然语言描述）
+    metadata JSONB DEFAULT '{}'::JSONB,         -- 附加数据（旧值/新值/来源等）
+    caller TEXT DEFAULT '',                     -- 调用方标识（api|mcp|agent|system|user）
+    ip_address TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_audit_agent ON audit_log (agent_id, created_at DESC);
+CREATE INDEX idx_audit_fact ON audit_log (fact_id, created_at DESC);
+CREATE INDEX idx_audit_operation ON audit_log (operation, created_at DESC);
+-- 按时间范围查询（最常用）
+CREATE INDEX idx_audit_created ON audit_log (created_at DESC);

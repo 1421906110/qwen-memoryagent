@@ -1563,3 +1563,31 @@ async def system_health(agent_id: str = "default"):
         "checks": checks,
         "issues": issues,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 审计日志端点（受 DREAM audit ledger 启发）
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/audit")
+async def query_audit(agent_id: str = "",
+                      operation: str = "",
+                      limit: int = 50,
+                      offset: int = 0,
+                      since_hours: int = 0):
+    """查询审计日志"""
+    db = cogni.fact_network.db if cogni and cogni.fact_network else None
+    if not db or not hasattr(db, 'query_audit'):
+        return {"status": "error", "message": "审计日志不可用（无数据库）"}
+
+    try:
+        rows = db.query_audit(
+            agent_id=agent_id,
+            operation=operation,
+            limit=limit,
+            offset=offset,
+            since_hours=since_hours,
+        )
+        return {"status": "ok", "count": len(rows), "entries": rows}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
