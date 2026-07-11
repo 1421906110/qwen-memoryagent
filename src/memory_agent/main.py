@@ -1566,6 +1566,40 @@ async def system_health(agent_id: str = "default"):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 跨 Agent 记忆总线端点（受 Universal Agent OS 启发）
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/memory-bus")
+async def cross_agent_recall(query: str = "", agent_ids: str = "",
+                              top_k: int = 10):
+    """跨 Agent 记忆总线：同时查询多个 Agent 的记忆"""
+    if not query or not agent_ids:
+        return {"status": "error", "message": "需要 query 和 agent_ids 参数"}
+    ids = [a.strip() for a in agent_ids.split(",") if a.strip()]
+    if not ids:
+        return {"status": "error", "message": "至少指定一个 Agent ID"}
+    try:
+        result = cogni.recall_cross_agent(query=query, agent_ids=ids, top_k=top_k)
+        return {
+            "status": "ok",
+            "count": result["count"],
+            "facts": [
+                {
+                    "fact": f"{f.subject} {f.predicate} {f.object}",
+                    "confidence": f.confidence,
+                    "agent_id": f.agent_id,
+                    "citation": f.citation,
+                    "stale_warning": f.stale_warning,
+                }
+                for f in result["facts"]
+            ],
+            "sources": result["sources"],
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
 # 审计日志端点（受 DREAM audit ledger 启发）
 # ═══════════════════════════════════════════════════════════════
 

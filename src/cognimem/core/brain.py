@@ -219,6 +219,47 @@ class CogniMem:
             "contradictions": pending_contradictions if pending_contradictions else None,
         }
 
+    def recall_cross_agent(self, query: str, agent_ids: list[str],
+                           top_k: int = 10) -> dict:
+        """
+        ★ 跨 Agent 记忆总线（受 Universal Agent OS 多Agent记忆总线启发）。
+
+        从多个 Agent 的记忆库中同时召回，去重后按置信度排序返回。
+        适合：团队知识共享/多角色记忆池。
+
+        Args:
+            query: 查询文本
+            agent_ids: 要查询的 Agent ID 列表
+            top_k: 最大返回数
+
+        Returns:
+            {"facts": [...], "count": N, "sources": {agent_id: count}}
+        """
+        from collections import Counter
+        all_facts = []
+        seen_ids = set()
+        source_counts = Counter()
+
+        for aid in agent_ids[:10]:  # 最多查 10 个 agent
+            try:
+                result = self.recall(query, aid, top_k=top_k // len(agent_ids[:10]))
+                for f in result.get("facts", []):
+                    if f.fact_id not in seen_ids:
+                        seen_ids.add(f.fact_id)
+                        all_facts.append(f)
+                        source_counts[aid] += 1
+            except Exception as e:
+                logger.warning("Cross-agent recall failed for '%s': %s", aid, e)
+                continue
+
+        # 跨 Agent 排序（置信度降序）
+        all_facts.sort(key=lambda f: f.confidence, reverse=True)
+        return {
+            "facts": all_facts[:top_k],
+            "count": min(len(all_facts), top_k),
+            "sources": dict(source_counts.most_common()),
+        }
+
     def ask(self, query: str, agent_id: str = "default") -> dict:
         """
         问答式召回 — 适合 Agent 直接使用。

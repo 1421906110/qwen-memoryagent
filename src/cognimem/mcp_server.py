@@ -306,6 +306,35 @@ def memory_batch_remember(texts: str, agent_id: str = "default",
         return json.dumps({"status": "error", "message": str(e)})
 
 
+@mcp.tool(name="memory_bus",
+          description="跨 Agent 記憶總線（受 Universal Agent OS 啓發）：同時查詢多個 Agent 的記憶庫，返回去重後按置信度排序的結果。適合團隊知識共享。")
+def memory_bus(query: str, agent_ids: str, top_k: int = 10) -> str:
+    """跨 Agent 记忆总线：一次查询多个 Agent 的记忆"""
+    ids = [a.strip() for a in agent_ids.split(",") if a.strip()]
+    if not ids:
+        return json.dumps({"status": "error", "message": "請指定至少一個 Agent ID"})
+    try:
+        result = brain.recall_cross_agent(query=query, agent_ids=ids, top_k=top_k)
+        facts = result.get("facts", [])
+        sources = result.get("sources", {})
+        return json.dumps({
+            "status": "success",
+            "count": result.get("count", 0),
+            "facts": [
+                {
+                    "fact": f"{f.subject} {f.predicate} {f.object}",
+                    "confidence": f.confidence,
+                    "agent_id": f.agent_id,
+                    "citation": f.citation,
+                }
+                for f in facts
+            ],
+            "sources": sources,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 @mcp.tool(name="audit_query",
           description="查詢審計日誌：查看記憶的創建/讀取/更新/刪除等操作歷史。受 DREAM audit ledger 啟發。")
 def audit_query(agent_id: str = "", operation: str = "",
