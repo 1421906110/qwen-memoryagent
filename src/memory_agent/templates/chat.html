@@ -434,6 +434,65 @@
   .modal-actions .primary { background: var(--accent); color: white; border-color: var(--accent); }
   .modal-actions .cancel { background: transparent; color: var(--text-dim); }
   .modal-actions .cancel:hover { background: var(--hover); }
+
+  /* ═══════════════════ Responsive Mobile ═══════════════════ */
+  @media (max-width: 768px) {
+    .sidebar-wrap {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      z-index: 1000;
+      width: 280px;
+      min-width: 280px;
+      transform: translateX(-110%);
+      transition: transform 0.25s ease;
+      box-shadow: 2px 0 16px rgba(0,0,0,0.15);
+    }
+    .sidebar-wrap.open { transform: translateX(0); }
+    .sidebar-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.3);
+      z-index: 999;
+    }
+    .sidebar-overlay.show { display: block; }
+    .sidebar-gap { display: none; }
+
+    body { font-size: 15px; }
+    .main { width: 100%; }
+
+    .chat-hd { padding: 10px 14px; }
+    .chat-hd h1 { font-size: 14px; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mobile-toggle {
+      display: flex !important;
+      width: 32px; height: 32px; align-items: center; justify-content: center;
+      border: none; background: transparent; color: var(--text);
+      font-size: 20px; cursor: pointer; border-radius: 6px; flex-shrink: 0;
+    }
+    .mobile-toggle:active { background: var(--hover); }
+
+    .chat-input { padding: 10px 12px 14px; }
+    .chat-input input { font-size: 16px; padding: 12px; }  /* bigger touch target */
+    .chat-input button { padding: 10px 20px; font-size: 15px; }  /* bigger touch target */
+
+    .msg { max-width: 92%; padding: 10px 14px; }
+    .msg .sender { font-size: 11px; }
+
+    .empty-state .icon { font-size: 40px; }
+    .empty-state p { font-size: 14px; }
+    .empty-state .hint { font-size: 12px; }
+  }
+  @media (max-width: 480px) {
+    .chat-hd { padding: 8px 10px; }
+    .chat-hd-actions .nav-link { font-size: 12px; padding: 4px 8px; }
+    .msg { max-width: 96%; padding: 8px 12px; font-size: 14px; }
+    .chat-input { padding: 8px 10px 12px; }
+    .chat-input input { font-size: 16px; padding: 10px; }
+    .chat-input button { padding: 10px 16px; font-size: 14px; }
+
+    .chat-msgs { padding: 8px; }
+    .modal { width: 90%; max-width: 340px; padding: 20px; }
+  }
+  .mobile-toggle { display: none; }
 </style>
 </head>
 <body>
@@ -501,11 +560,13 @@
   </div>
   <div class="sidebar-gap"></div>
 </div>
+<div class="sidebar-overlay" onclick="toggleSidebar()"></div>
 
 <!-- ═══════ MAIN ═══════ -->
 <div class="main">
   <div class="chat-hd">
     <div class="chat-hd-left">
+      <button class="mobile-toggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
       <h1 id="chat-title">新对话</h1>
       <span class="badge" id="session-badge"></span>
     </div>
@@ -604,6 +665,12 @@ function cycleAgent() {
   d.activeSession = '';
   S(d);
   renderAll();
+}
+
+// ═══════════════════ Mobile sidebar toggle ═══════════════════
+function toggleSidebar() {
+  document.querySelector('.sidebar-wrap')?.classList.toggle('open');
+  document.querySelector('.sidebar-overlay')?.classList.toggle('show');
 }
 
 function switchAgent(id) {

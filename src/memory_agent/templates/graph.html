@@ -125,6 +125,18 @@
     .topbar .stat { margin-left: 0; width: 100%; justify-content: space-around; }
     #detail-panel { width: 100%; right: -100%; }
   }
+  @media (max-width: 480px) {
+    .topbar { padding: 8px 10px; flex-wrap: wrap; gap: 6px; }
+    .topbar .title { font-size: 14px; }
+    .topbar .stat span { font-size: 10px; padding: 2px 6px; }
+    .topbar .stat .n { font-size: 13px; }
+    #detail-panel { padding: 14px; }
+    #detail-panel h3 { font-size: 14px; }
+    #detail-panel p { font-size: 12px; }
+    #filter-bar { padding: 6px 10px; flex-wrap: wrap; gap: 4px; }
+    #filter-bar label { font-size: 11px; }
+    #filter-bar select { font-size: 12px; padding: 3px 6px; }
+  }
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 </style>
