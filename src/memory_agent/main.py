@@ -1098,14 +1098,13 @@ async def memory_graph(
 def _resolve_agent(agent_id: str) -> str:
     """agent_id=default 时自动 fallback 到第一个有数据的 agent"""
     if agent_id == "default" and cogni and cogni.fact_network and cogni.fact_network.db:
+        db = cogni.fact_network.db
         try:
-            conn = cogni.fact_network.db._get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT agent_id FROM facts GROUP BY agent_id ORDER BY MAX(created_at) DESC LIMIT 1")
-            row = cur.fetchone()
-            if row:
-                agent_id = row[0]
-            cogni.fact_network.db._put_conn(conn)
+            with db._plain_cursor_ctx() as cur:
+                cur.execute("SELECT agent_id FROM facts GROUP BY agent_id ORDER BY MAX(created_at) DESC LIMIT 1")
+                row = cur.fetchone()
+                if row:
+                    agent_id = row[0]
         except Exception:
             pass
     return agent_id
@@ -1118,20 +1117,19 @@ async def list_agents():
     # 从 CogniMem PostgreSQL 获取所有 agent_id
     if cogni and cogni.fact_network and cogni.fact_network.db:
         try:
-            conn = cogni.fact_network.db._get_conn()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT agent_id, COUNT(*) AS fact_count,
-                       MAX(created_at) AS last_active
-                FROM facts GROUP BY agent_id
-                ORDER BY last_active DESC NULLS LAST
-            """)
-            for row in cur.fetchall():
-                agents.append({
-                    "id": row[0],
-                    "fact_count": row[1],
-                })
-            cogni.fact_network.db._put_conn(conn)
+            db = cogni.fact_network.db
+            with db._cursor_ctx() as cur:
+                cur.execute("""
+                    SELECT agent_id, COUNT(*) AS fact_count,
+                           MAX(created_at) AS last_active
+                    FROM facts GROUP BY agent_id
+                    ORDER BY last_active DESC NULLS LAST
+                """)
+                for row in cur.fetchall():
+                    agents.append({
+                        "id": row[0],
+                        "fact_count": row[1],
+                    })
         except Exception as e:
             logger.warning("Agent list query failed: %s", e)
     if not agents:
