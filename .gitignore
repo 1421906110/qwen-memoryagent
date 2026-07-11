@@ -34,6 +34,5 @@ nohup.out
 benchmark_results.json
 benchmark.py
 
-# Old cognimem module (migrated to memory_agent/)
-src/cognimem/
+# core 引擎 — 正在使用中，不排除
 
