@@ -13,6 +13,7 @@ import logging
 import json
 import threading
 import time
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Any
 from collections import defaultdict, OrderedDict
@@ -97,6 +98,22 @@ class FactNetwork:
         self._last_consolidation: dict[str, float] = {}  # agent_id → timestamp
         self._auto_consolidate_interval = 1800  # 30 分钟空闲后自动整合
         self._consolidating: set[str] = set()  # 正在整合中的 agent
+
+        # ═══════════════════════════════════════════════
+        # ★ v0.12 P0-4: STM 短期缓冲区（AMP 3层大脑启发）
+        # ═══════════════════════════════════════════════
+        # 新事实先入 STM，合并/遗忘时进入 LTM
+        self._stm: dict[str, list[FactTriple]] = {}      # agent_id → [facts]
+        self._stm_max = 30                                 # 每 agent 最多 30 条
+        self._stm_ttl = 600                                # 10 分钟 TTL
+        self._stm_timestamps: dict[str, float] = {}        # fact_id → timestamp
+
+        # ═══════════════════════════════════════════════
+        # ★ v0.12 P0-3: 语义缓存（Mem0 启发）
+        # ═══════════════════════════════════════════════
+        self._semantic_cache: dict[str, tuple[list, float]] = {}  # query → (results, ts)
+        self._semantic_cache_ttl = 180   # 3 分钟
+        self._semantic_threshold = 0.55  # Token 重叠度阈值
 
         # 配置
         self.conf_initial = self._config.get("confidence_initial", DEFAULT_CONF_INITIAL)
@@ -184,6 +201,12 @@ class FactNetwork:
                         self.db.save_contradiction(c)
 
                 return {"status": "contradiction_detected", "fact": fact, "contradictions": contradictions}
+
+            # ★ v0.12 P0-2: 记忆进化（仅非矛盾的新事实触发）
+            self._evolve_on_add(fact)
+
+            # ★ v0.12 P0-4: STM 缓冲区（新事实入 STM）
+            self._add_to_stm(fact)
 
             return {"status": "created", "fact": fact}
 
@@ -352,6 +375,10 @@ class FactNetwork:
           L2 conflict — 间接冲突（冰美式 vs 热美式）
           L3 context  — 上下文变化（截止日期从周五 → 周三）
         """
+        # ★ P1-3: 凭证不参与矛盾检测
+        if fact.fact_type == "credential":
+            return []
+
         context_predicates = {
             "是", "在", "去了", "住在", "位于", "来自",
             "开始", "结束", "截止", "推迟", "提前", "延长",
@@ -550,15 +577,20 @@ class FactNetwork:
 
     def _apply_decay(self, fact: FactTriple, now) -> float:
         """
-        艾宾浩斯衰减公式。
+        ★ v0.13 Weibull 衰减公式（替代指数衰减）。
+
+        LiCoMemory 验证：Weibull (k=1.5) 比指数衰减更符合真实遗忘曲线。
+        - 初始慢降：近期信息保持好
+        - 后期陡降：过期信息快速遗忘
+
+        公式: new_conf = conf × exp(-(days/λ)^k)
+        其中 λ = half_life / ln(2)^(1/k)，保证在 half_life 天时衰减到 50%。
 
         半衰期因记忆强度而异：
         - 抽象概念: 60 天
         - 高置信 (>0.6): 30 天
         - 普通: 14 天
         - 低置信 (<0.3): 7 天
-
-        公式: new_conf = conf × 0.5^(days/halflife)
         """
         accessed = datetime.fromisoformat(fact.accessed_at)
         days = (now - accessed).days
@@ -581,7 +613,11 @@ class FactNetwork:
         elif fact.access_count > 5:
             half_life *= 1.2
 
-        decay = 0.5 ** (days / half_life)
+        # Weibull 衰减
+        import math
+        shape_k = 1.5
+        lam = half_life / (math.log(2) ** (1.0 / shape_k))
+        decay = math.exp(-((days / lam) ** shape_k))
         return max(0.0, fact.confidence * decay)
 
     # ═══════════════════════════════════════════
@@ -602,7 +638,14 @@ class FactNetwork:
         # ⭐ 整个 consolidate 在一把锁下执行，避免并发读写不一致
         with self._lock:
             results = {"merged": 0, "promoted": 0, "abstracted": 0,
-                       "contradictions_resolved": 0}
+                       "contradictions_resolved": 0, "stm_flushed": 0}
+
+            # ★ v0.12 P0-4: 先将 STM 缓冲区的数据合并到 LTM
+            before = self._stm_count(agent_id)
+            self._flush_stm(agent_id)
+            if before > 0:
+                results["stm_flushed"] = before
+                logger.info(f"STM flushed: {before} facts for '{agent_id}'")
 
             # 1. ⭐ 记忆抽象化（先执行，在合并前找到模式）
             try:
@@ -1156,9 +1199,10 @@ class FactNetwork:
             return None
 
     def _set_stats_cached(self, agent_id: str, stats: dict):
-        """写入统计缓存"""
+        """写入统计缓存（含 STM 计数）"""
         with self._lock:
             stats["_ts"] = time.time()
+            stats["stm_count"] = self._stm_count(agent_id)
             self._stats_cache[agent_id] = stats
 
     def _get_query_cached(self, cache_key: str) -> list | None:
@@ -1181,3 +1225,246 @@ class FactNetwork:
             if len(self._query_cache) > 200:
                 oldest_key = min(self._query_cache, key=lambda k: self._query_cache[k][1])
                 del self._query_cache[oldest_key]
+
+    # ═══════════════════════════════════════════════════════════════
+    # ★ v0.12 P0-4: STM 短期缓冲区（AMP 3层大脑启发）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _add_to_stm(self, fact: FactTriple):
+        """AMP 启发：新事实先入 STM 缓冲区。
+
+        STM 模拟人类短期记忆：
+        - 有限容量（30 条/agent）：满则最旧移入 LTM
+        - 短 TTL（10 分钟）：过期则淘汰
+        - 在 STM 中的事实获得召回加分（新鲜感优先）
+        """
+        agent = fact.agent_id
+        with self._lock:
+            if agent not in self._stm:
+                self._stm[agent] = []
+            self._stm[agent].append(fact)
+            self._stm_timestamps[fact.fact_id] = time.time()
+
+            # FIFO 淘汰：STM 满 → 最旧的先入 LTM（标记为已持久化）
+            while len(self._stm[agent]) > self._stm_max:
+                oldest = self._stm[agent].pop(0)
+                # 已经在 cache+DB 中（add_fact 做了），只需从 STM 移除
+                self._stm_timestamps.pop(oldest.fact_id, None)
+
+    def _get_stm_facts(self, agent_id: str) -> list[FactTriple]:
+        """获取 STM 缓冲区的有效事实（清理过期的）。"""
+        with self._lock:
+            now = time.time()
+            stm = self._stm.get(agent_id, [])
+            valid = []
+            for f in stm:
+                ts = self._stm_timestamps.get(f.fact_id, 0)
+                if now - ts < self._stm_ttl:
+                    valid.append(f)
+            # 清理过期
+            if len(valid) != len(stm):
+                self._stm[agent_id] = valid
+            return valid
+
+    def _flush_stm(self, agent_id: str):
+        """强制合并 STM → LTM（在 consolidate 时调用）。"""
+        with self._lock:
+            stm = self._stm.get(agent_id, [])
+            for fact in stm:
+                # STM 事实已在 cache+DB 中，只需确保持久化
+                self._cache_put(fact)
+                if self.db:
+                    try:
+                        self.db.update_fact(fact)
+                    except Exception:
+                        pass
+            self._stm[agent_id] = []
+            for fid in list(self._stm_timestamps.keys()):
+                self._stm_timestamps.pop(fid, None)
+
+    def _stm_count(self, agent_id: str) -> int:
+        """STM 缓冲区大小"""
+        with self._lock:
+            return len(self._stm.get(agent_id, []))
+
+    # ═══════════════════════════════════════════════════════════════
+    # ★ v0.12 P0-3: 语义缓存（Mem0 启发）
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _query_similarity(q1: str, q2: str) -> float:
+        """Token 重叠度查询相似度（中文双字组+英文单词）。
+
+        用 BM25 的分词方式计算两查询的 token 集合重叠度。
+        更适合中文：'冰美式' = {冰,美,式,冰美,美式}
+        与 '冰美式咖啡' = {冰,美,式,咖,啡,冰美,美式,式咖,咖啡}
+        共享 token 多 → 相似度高。
+        """
+        if not q1 or not q2:
+            return 0.0
+        q1 = q1.lower().strip()
+        q2 = q2.lower().strip()
+        if q1 == q2:
+            return 1.0
+
+        import re
+
+        def _tokenize(text: str) -> set[str]:
+            tokens = set()
+            # 英文单词
+            for w in re.findall(r'[a-zA-Z0-9_]+', text):
+                tokens.add(w)
+            # 中文字符
+            chinese = re.findall(r'[一-鿿]+', text)
+            for seg in chinese:
+                for c in seg:
+                    tokens.add(c)
+                for i in range(len(seg) - 1):
+                    tokens.add(seg[i:i + 2])
+            return tokens
+
+        t1 = _tokenize(q1)
+        t2 = _tokenize(q2)
+        if not t1 or not t2:
+            return 0.0
+
+        inter = t1 & t2
+        union = t1 | t2
+        return len(inter) / max(len(union), 1)
+
+    def _semantic_cache_get(self, query: str) -> list | None:
+        """语义缓存查询：找出相似度 > 阈值的缓存结果。"""
+        if not query:
+            return None
+        q = query.lower().strip()
+        now = time.time()
+        best_match = None
+        best_sim = 0.0
+        with self._lock:
+            for cached_q, (results, ts) in list(self._semantic_cache.items()):
+                if now - ts > self._semantic_cache_ttl:
+                    del self._semantic_cache[cached_q]
+                    continue
+                sim = self._query_similarity(q, cached_q)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_match = results
+        if best_sim >= self._semantic_threshold:
+            return best_match
+        return None
+
+    def _semantic_cache_put(self, query: str, results: list):
+        """写入语义缓存。"""
+        if not query:
+            return
+        key = query.lower().strip()
+        with self._lock:
+            self._semantic_cache[key] = (results, time.time())
+            if len(self._semantic_cache) > 100:
+                oldest = min(self._semantic_cache,
+                             key=lambda k: self._semantic_cache[k][1])
+                del self._semantic_cache[oldest]
+
+    # ═══════════════════════════════════════════════════════════════
+    # ★ v0.12 P0-2: 记忆进化（A-MEM Zettelkasten 启发）
+    # ═══════════════════════════════════════════════════════════════
+
+    def _find_related_facts(self, fact: FactTriple) -> list[tuple[FactTriple, str]]:
+        """A-MEM 启发：找出与新事实相关的事实。
+
+        Returns:
+            [(FactTriple, relation_type), ...]
+            relation_type: 'consistent' | 'complementary' | 'tangential'
+        """
+        # ★ P1-3: 凭证不参与记忆进化
+        if fact.fact_type == "credential":
+            return []
+
+        related = []
+        for existing in self._get_agent_facts(fact.agent_id):
+            if existing.fact_id == fact.fact_id:
+                continue
+            # ★ P1-3: 跳过已有凭证
+            if existing.fact_type == "credential":
+                continue
+            # 跳过已被矛盾标记的
+            if fact.fact_id in existing.contradictions:
+                continue
+            # 同 subject → 可能互补或一致
+            if existing.subject == fact.subject:
+                # 同 predicate 不同 object（列举关系，如多个喜欢的东西）
+                if existing.predicate == fact.predicate and existing.object != fact.object:
+                    # 确认不是矛盾（add_fact 已检测过，这里只处理非矛盾）
+                    related.append((existing, 'complementary'))
+                # 不同 predicate（侧面补充，如同一人的多属性）
+                elif existing.predicate != fact.predicate:
+                    related.append((existing, 'consistent'))
+            # 共享标签 → 弱相关
+            elif set(existing.context_tags) & set(fact.context_tags):
+                # 至少 2 个标签重叠才算
+                shared = set(existing.context_tags) & set(fact.context_tags)
+                if len(shared) >= 2 or any(len(t) > 2 for t in shared):
+                    related.append((existing, 'tangential'))
+        return related
+
+    def _evolve_on_add(self, fact: FactTriple):
+        """A-MEM 记忆进化：新事实触发已有事实的更新。
+
+        在 contradiction 检测之后执行（不冲突的补充事实才进化）。
+        进化方式：
+        - 'consistent' → 加双向链接 + 分享标签 + 置信度微升
+        - 'complementary' → 加双向链接
+        - 'tangential' → 仅单向链接（对已有事实无影响）
+        """
+        related = self._find_related_facts(fact)
+        evolved_count = 0
+        for existing, rel_type in related:
+            with self._lock:
+                if rel_type == 'consistent':
+                    # ★ 一致 → 加链接 + 分享标签 + 置信度+0.02
+                    if fact.fact_id not in existing.connected_facts:
+                        existing.connected_facts.append(fact.fact_id)
+                    if fact.fact_id not in fact.connected_facts:
+                        fact.connected_facts.append(existing.fact_id)
+                    # 分享标签
+                    for tag in fact.context_tags:
+                        if tag not in existing.context_tags:
+                            existing.context_tags.append(tag)
+                    # 置信度微升（0.02，有来源权重衰减）
+                    self._update_confidence(
+                        existing, 0.02,
+                        f"evolved_from_{fact.fact_id[:8]}",
+                        source_type="user_statement"
+                    )
+                    self._cache_put(existing)
+                    if self.db:
+                        try:
+                            self.db.update_fact(existing)
+                        except Exception:
+                            pass
+                    evolved_count += 1
+
+                elif rel_type == 'complementary':
+                    # ★ 列举 → 加双向链接
+                    if fact.fact_id not in existing.connected_facts:
+                        existing.connected_facts.append(fact.fact_id)
+                    if existing.fact_id not in fact.connected_facts:
+                        fact.connected_facts.append(existing.fact_id)
+                    self._cache_put(existing)
+                    if self.db:
+                        try:
+                            self.db.update_fact(existing)
+                        except Exception:
+                            pass
+                    evolved_count += 1
+
+                elif rel_type == 'tangential':
+                    # ★ 弱相关 → 新事实记录弱链接（不改变旧事实）
+                    if existing.fact_id not in fact.connected_facts:
+                        fact.connected_facts.append(existing.fact_id)
+
+        if evolved_count:
+            logger.info(
+                f"🧬 Memory evolution: new fact '{fact.subject} {fact.predicate} {fact.object}' "
+                f"evolved {evolved_count} related facts"
+            )

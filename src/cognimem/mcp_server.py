@@ -363,9 +363,53 @@ def audit_query(agent_id: str = "", operation: str = "",
         return json.dumps({"status": "error", "message": str(e)})
 
 
-# ═══════════════════════════════════════════════════════════════
-# 启动
-# ═══════════════════════════════════════════════════════════════
+@mcp.tool(name="credential_store",
+          description="安全存储凭证（密码/API Key/密鑰等）。存儲在知識庫中，普通記憶召回不會洩露。")
+def credential_store(service: str, credential: str,
+                      agent_id: str = "default") -> str:
+    """安全存储凭证到知识库"""
+    try:
+        result = brain.remember_credential(service, credential, agent_id)
+        return json.dumps({
+            "status": result["status"],
+            "service": result["service"],
+            "message": f"凭证已{'更新' if result['status']=='updated' else '存储'}: {service}",
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(name="credential_recall",
+          description="安全召回凭证。只有通过此工具才能解密獲取憑證原文，普通記憶召回不會洩露。")
+def credential_recall(service: str, agent_id: str = "default") -> str:
+    """安全召回凭证"""
+    try:
+        result = brain.recall_credential(service, agent_id)
+        if result["status"] == "not_found":
+            return json.dumps({"status": "not_found", "message": f"未找到服务「{service}」的凭证"})
+        return json.dumps({
+            "status": "found",
+            "service": result["service"],
+            "credential": result["credential"],
+            "safe_display": result["safe_display"],
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool(name="credential_list",
+          description="列出所有已存儲的憑證（不泄露原文）。返回服務名稱和創建時間。")
+def credential_list(agent_id: str = "default") -> str:
+    """列出所有凭证"""
+    try:
+        creds = brain.list_credentials(agent_id)
+        return json.dumps({
+            "status": "ok",
+            "count": len(creds),
+            "credentials": creds,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
 
 def main():
     import argparse

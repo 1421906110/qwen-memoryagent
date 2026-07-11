@@ -12,6 +12,7 @@ CogniMem 大脑 — 核心编排器
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 from .models import FactTriple, EvidenceItem
 from .extractor import TripleExtractor
@@ -472,8 +473,124 @@ class CogniMem:
             db.log_audit(agent_id, "consolidation", detail, caller="brain.consolidate")
         return result
 
+    # ═══════════════════════════════════════════════════════════════
+    # ★ P1-3: 知识库模块（MIRIX Knowledge Vault 启发）
+    # ═══════════════════════════════════════════════════════════════
+
+    def remember_credential(self, service: str, credential: str,
+                            agent_id: str = "default") -> dict:
+        """安全存储凭证（密码/API Key/密钥等）。
+
+        与普通 remember 的区别：
+        - 存储为 fact_type='credential'
+        - 对象值做简单 XOR 混淆（非真正加密，仅供基础保护）
+        - 普通 recall 不会返回 credential 数据
+        - 必须通过 recall_credential() 明确调用
+
+        Args:
+            service: 服务名称（如 "微信", "GitHub", "openai_api_key"）
+            credential: 凭证原文
+            agent_id: Agent ID
+        """
+        # 简单混淆（XOR + base64，防明文存储）
+        import base64
+        key = 0x5A
+        masked_bytes = bytes(c ^ key for c in credential.encode('utf-8'))
+        obfuscated = base64.b64encode(masked_bytes).decode('ascii')
+
+        fact = FactTriple(
+            subject=service,
+            predicate="凭证",
+            object=obfuscated,
+            agent_id=agent_id,
+            fact_type="credential",
+            confidence=1.0,
+            importance=0.9,
+            encoding_level="credential",
+            evidence=[EvidenceItem(
+                source="credential_store",
+                statement=f"知识库: {service} 的凭证已安全存储",
+            )],
+        )
+
+        # 跳过矛盾检测和进化（凭证不产生矛盾，不参与链接）
+        fn = self.fact_network
+        # 按 subject 查找已有凭证（而非 triple_key，因 object 是混淆值每次不同）
+        existing = None
+        for f in fn._get_agent_facts(agent_id):
+            if f.subject == service and f.fact_type == "credential":
+                existing = f
+                break
+        if existing:
+            # 已存在 → 更新
+            existing.object = obfuscated
+            existing.confidence = 1.0
+            existing.accessed_at = datetime.now(timezone.utc).isoformat()
+            fn._cache_put(existing)
+            if fn.db:
+                fn.db.update_fact(existing)
+            logger.info(f"🔐 Credential updated: {service}")
+            return {"status": "updated", "service": service}
+
+        # 新凭证
+        fn._cache_put(fact)
+        fn._add_to_stm(fact)
+        if fn.db:
+            try:
+                fn.db.save_fact(fact)
+            except Exception as e:
+                logger.error("Credential DB save failed: %s", e)
+        logger.info(f"🔐 Credential stored: {service}")
+        return {"status": "stored", "service": service}
+
+    def recall_credential(self, service: str,
+                          agent_id: str = "default") -> dict:
+        """安全召回凭证。
+
+        只有通过此方法才能获取解密后的凭证原文。
+        普通 recall 不会泄露 credential 数据。
+
+        Args:
+            service: 服务名称
+            agent_id: Agent ID
+
+        Returns:
+            {"service": "", "credential": "", "status": "found"|"not_found"}
+        """
+        import base64
+        fn = self.fact_network
+        # 精确查找 credential 事实
+        for f in fn._get_agent_facts(agent_id):
+            if f.subject == service and f.fact_type == "credential":
+                # 解码
+                try:
+                    masked = base64.b64decode(f.object.encode('ascii'))
+                    key = 0x5A
+                    decoded = bytes(b ^ key for b in masked).decode('utf-8')
+                except Exception:
+                    decoded = f.object  # 解码失败返回原始混淆值
+                return {
+                    "status": "found",
+                    "service": service,
+                    "credential": decoded,
+                    "safe_display": f.safe_display,
+                }
+        return {"status": "not_found", "service": service}
+
+    def list_credentials(self, agent_id: str = "default") -> list[dict]:
+        """列出所有已存储的凭证（不泄露原文）。"""
+        services = []
+        for f in self.fact_network._get_agent_facts(agent_id):
+            if f.fact_type == "credential":
+                services.append({
+                    "service": f.subject,
+                    "safe_display": f.safe_display,
+                    "created_at": f.created_at[:10],
+                })
+        return services
+
     def get_stats(self, agent_id: str = "default") -> dict:
-        """获取统计信息"""
+        """获取统计信息（v0.12 含 STM 计数）"""
         facts = self.fact_network._get_agent_facts(agent_id)
         contradictions = self.fact_network.get_contradictions(agent_id)
         return {
@@ -484,6 +601,8 @@ class CogniMem:
             "contradictions": len(contradictions),
             "by_type": self._count_by_type(facts),
             "router_stats": self.recall_router.get_stats(),
+            # ★ v0.12 新增
+            "stm_buffer": self.fact_network._stm_count(agent_id),
         }
 
     def _count_by_type(self, facts: list) -> dict:

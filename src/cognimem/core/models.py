@@ -62,7 +62,7 @@ class FactTriple:
             self.importance = 0.5
         self.importance = max(0.0, min(1.0, self.importance))
         # encoding_level 校验：仅允许已知值
-        valid_levels = {"raw", "compressed", "core", "abstraction", "abstracted"}
+        valid_levels = {"raw", "compressed", "core", "abstraction", "abstracted", "credential"}
         if self.encoding_level not in valid_levels:
             self.encoding_level = "raw"
 
@@ -115,8 +115,27 @@ class FactTriple:
                         "agent_inference": "AI推断",
                         "tool_result": "工具结果",
                         "system": "系统",
-                        "memory_abstraction": "记忆归纳"}.get(src, src)
+                        "memory_abstraction": "记忆归纳",
+                        "credential_store": "知识库"}.get(src, src)
         return "未知"
+
+    @property
+    def is_credential(self) -> bool:
+        """是否为敏感凭证（知识库中的密码/API Key等）"""
+        return self.fact_type == "credential"
+
+    @property
+    def safe_display(self) -> str:
+        """安全展示：凭证只显示前缀+掩码，不显示原文"""
+        if not self.is_credential:
+            return f"{self.subject} {self.predicate} {self.object}"
+        # 对敏感值做掩码
+        val = str(self.object)
+        if len(val) <= 4:
+            masked = val[0] + '*' * (len(val) - 1) if val else '****'
+        else:
+            masked = val[:2] + '*' * (len(val) - 4) + val[-2:]
+        return f"{self.subject} {self.predicate} {masked} [知识库-安全存储]"
 
     @property
     def citation(self) -> str:
