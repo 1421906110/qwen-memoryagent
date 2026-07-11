@@ -1165,14 +1165,19 @@ async def list_agents():
 
 @app.get("/stats")
 async def stats(agent_id: str):
-    """统计 — CogniMem 引擎数据"""
+    """统计 — CogniMem 引擎数据（v0.13 含STM+路由+知识库）"""
     if cogni is None:
         return {"agent_id": agent_id, "total_facts": 0, "core_beliefs": 0,
                 "unreliable": 0, "contradictions": 0, "by_type": {},
-                "router_stats": {}, "abstractions": 0}
-    # default 时自动 fallback 到第一个有数据的 agent
+                "router_stats": {}, "abstractions": 0, "stm_buffer": 0}
     agent_id = _resolve_agent(agent_id)
     data = cogni.get_stats(agent_id)
+    # 补充知识库统计
+    try:
+        creds = cogni.list_credentials(agent_id)
+        data["credential_count"] = len(creds)
+    except Exception:
+        data["credential_count"] = 0
     return data
 
 
@@ -1491,11 +1496,26 @@ async def system_health(agent_id: str = "default"):
             elif total < 5:
                 score -= 3
 
+            # ★ v0.13: STM + 路由统计
+            stm_count = 0
+            router_stats = {}
+            if cogni and cogni.fact_network:
+                try:
+                    stm_count = cogni.fact_network._stm_count(agent_id)
+                except Exception:
+                    pass
+                try:
+                    router_stats = cogni.recall_router.get_stats()
+                except Exception:
+                    pass
+
             checks["memory"] = {
                 "total": total, "contradictions": contradictions,
                 "core_beliefs": core, "unreliable": unreliable,
                 "by_type": by_type,
+                "stm_buffer": stm_count,    # v0.13
             }
+            checks["router"] = router_stats  # v0.13
 
         except Exception as e:
             mem_issues.append(f"CogniMem 异常: {str(e)[:60]}")

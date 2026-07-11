@@ -211,9 +211,9 @@
       <div class="sub">核心信念·置信度≥0.9</div>
     </div>
     <div class="metric">
-      <div class="label">⭐ 偏好</div>
-      <div class="value accent" id="m-prefs">—</div>
-      <div class="sub">已学习的用户偏好</div>
+      <div class="label">🔐 知识库</div>
+      <div class="value accent" id="m-creds">—</div>
+      <div class="sub">安全存储的凭证</div>
     </div>
     <div class="metric">
       <div class="label">⚠️ 需关注</div>
@@ -222,7 +222,7 @@
     </div>
   </div>
 
-  <!-- Row 2: 2 metric cards -->
+  <!-- Row 2: 4 metric cards (v0.13 新增 STM + 路由) -->
   <div class="metrics2">
     <div class="metric2" id="health-card" onclick="showHealthDetail()">
       <div class="label">💚 系统健康</div>
@@ -233,6 +233,16 @@
       <div class="label">🔧 MCP 工具</div>
       <div class="value accent" id="m-tools">—</div>
       <div class="sub">已注册的工具数量</div>
+    </div>
+    <div class="metric2">
+      <div class="label">⚡ 短期缓存</div>
+      <div class="value green" id="m-stm">—</div>
+      <div class="sub">STM 缓冲区中的即时记忆</div>
+    </div>
+    <div class="metric2">
+      <div class="label">🎯 智能路由</div>
+      <div class="value accent" id="m-route-pct">—</div>
+      <div class="sub" id="m-route-sub">精确查询占比</div>
     </div>
   </div>
 
@@ -465,6 +475,9 @@ function showHealthDetail() {
   if (!_healthData) { detail.innerHTML = '<div class="loading" style="height:100px">加载中</div>'; modal.style.display = 'flex'; return; }
 
   const checks = _healthData.checks || {};
+  const router = checks.router || {};
+  const totalQ = router.total_queries || 0;
+  const factualPct = router.intent_factual_pct || '0%';
   const rows = [
     { k: '运行时间', v: checks.uptime || '-' },
     { k: '配置文件', v: checks.config || '-' },
@@ -472,6 +485,11 @@ function showHealthDetail() {
     { k: '核心信念', v: (checks.memory?.core_beliefs ?? '-') + '' },
     { k: '矛盾数', v: (checks.memory?.contradictions ?? '-') + '' },
     { k: '不可靠记忆', v: (checks.memory?.unreliable ?? '-') + '' },
+    // v0.13 新指标
+    { k: 'STM缓冲区', v: (checks.memory?.stm_buffer ?? '-') + ' 条' },
+    { k: '精确查询(Factual)', v: factualPct + ' (' + (router.intent_factual || 0) + ')' },
+    { k: '主动检索命中', v: (router.active_retrieval_hits || 0) + '' },
+    { k: '查询总数', v: totalQ + '' },
     { k: 'API 调用', v: (checks.api?.total_calls ?? '-') + '' },
     { k: 'API 错误率', v: checks.api?.windowed_error_rate || '-' },
     { k: 'MCP 工具', v: (checks.tools ?? '-') + '' },
@@ -502,21 +520,23 @@ async function loadDashboard() {
   }
 
   try {
-    // Fetch health (has all metrics we need) + decay-analysis
-    const [healthResp, decayResp] = await Promise.all([
+    // Fetch health (has all metrics we need) + decay-analysis + stats(credentials)
+    const [healthResp, decayResp, statsResp] = await Promise.all([
       fetch('/health'),
       fetch('/decay-analysis?agent_id=' + encodeURIComponent(agentId) + '&min_confidence=0'),
+      fetch('/stats?agent_id=' + encodeURIComponent(agentId)),
     ]);
     const health = await healthResp.json();
     _healthData = health;
+    const statsData = await statsResp.json();
     const decay = await decayResp.json();
     const memories = decay.memories || [];
 
     // Row 1 metrics
     const total = health.checks?.memory?.total || memories.length || 0;
     const concepts = health.checks?.memory?.core_beliefs || 0;
-    const preferences = health.checks?.memory?.by_type?.preference || 0;
     const contradictions = health.checks?.memory?.contradictions || 0;
+    const credentialCount = statsData.credential_count || 0;
 
     // Row 2 metrics
     const healthScore = health.score || 0;
@@ -526,7 +546,7 @@ async function loadDashboard() {
     document.getElementById('m-total').textContent = total;
     document.getElementById('m-total-sub').textContent = `共 ${Object.keys(health.checks?.memory?.by_type || {}).length} 种类型`;
     document.getElementById('m-concepts').textContent = concepts;
-    document.getElementById('m-prefs').textContent = preferences;
+    document.getElementById('m-creds').textContent = credentialCount;
     document.getElementById('m-risk').textContent = contradictions;
 
     const healthEl = document.getElementById('m-health');
@@ -535,6 +555,17 @@ async function loadDashboard() {
     document.getElementById('m-health-sub').textContent = healthLabel.replace('✅ ','').replace('⚠️ ','').replace('🔴 ','');
 
     document.getElementById('m-tools').textContent = tools;
+
+    // ★ v0.13: STM 缓冲区 + 路由统计
+    const stmCount = health.checks?.memory?.stm_buffer || 0;
+    document.getElementById('m-stm').textContent = stmCount;
+    document.getElementById('m-stm').className = 'value ' + (stmCount > 0 ? 'green' : '');
+    const route = health.checks?.router || {};
+    const factualPct = route.intent_factual_pct || '0%';
+    const activeHits = route.active_retrieval_hits || 0;
+    document.getElementById('m-route-pct').textContent = factualPct;
+    document.getElementById('m-route-sub').textContent =
+      `主动检索命中 ${activeHits} 次 · 共 ${route.total_queries || 0} 次查询`;
 
     // Count by type from memories
     const counts = {};
