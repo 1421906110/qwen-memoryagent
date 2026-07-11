@@ -1211,10 +1211,17 @@ async def memory_graph(
 # ══════════════════════════════════════════════════════════
 
 def _resolve_agent(agent_id: str) -> str:
-    """agent_id=default 时自动 fallback 到第一个有数据的 agent"""
+    """agent_id=default 时，仅在 default 真的没有数据时才 fallback 到最后活跃 agent"""
     if agent_id == "default" and cogni and cogni.fact_network and cogni.fact_network.db:
         db = cogni.fact_network.db
         try:
+            # 先查 default 自己有没有数据
+            with db._plain_cursor_ctx() as cur:
+                cur.execute("SELECT COUNT(*) FROM facts WHERE agent_id = 'default'")
+                row = cur.fetchone()
+                if row and row[0] > 0:
+                    return "default"  # default 有数据 → 不跳转
+            # default 没数据 → 退而求其次
             with db._plain_cursor_ctx() as cur:
                 cur.execute("SELECT agent_id FROM facts GROUP BY agent_id ORDER BY MAX(created_at) DESC LIMIT 1")
                 row = cur.fetchone()
