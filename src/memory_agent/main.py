@@ -58,7 +58,7 @@ logger = logging.getLogger("memory_agent")
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def _ts_to_epoch(ts_val) -> int:
@@ -66,6 +66,9 @@ def _ts_to_epoch(ts_val) -> int:
 
     FactTriple.to_dict() 返回 '2026-07-06T12:30:00+00:00' 格式，
     而前端用 new Date(m.created_at * 1000) 解析，需要秒级时间戳。
+
+    兼容 Python 3.10：datetime.fromisoformat 不支持带时区的 ISO 字符串，
+    需要手动剥离时区后缀。
     """
     if not ts_val:
         return 0
@@ -74,8 +77,31 @@ def _ts_to_epoch(ts_val) -> int:
     if isinstance(ts_val, datetime):
         return int(ts_val.timestamp())
     if isinstance(ts_val, str):
+        s = ts_val.strip()
+        # Q: 解析时区偏移量（避免 Python 3.10 fromisoformat 报错）
+        offset_hours = 0
         try:
-            return int(datetime.fromisoformat(ts_val).timestamp())
+            if s.endswith("Z"):
+                s = s[:-1]
+                offset_hours = 0
+            elif "+" in s:
+                # 找末尾的 +HH:MM
+                head, _, tz = s.rpartition("+")
+                if tz and ":" in tz and len(tz.strip()) in (5, 6):
+                    s = head
+                    parts = tz.split(":")
+                    offset_hours = int(parts[0]) + int(parts[1]) / 60
+            elif "-" in s[10:]:
+                # 找末尾的 -HH:MM
+                head, _, tz = s.rpartition("-")
+                if tz and ":" in tz and len(tz.strip()) in (5, 6):
+                    s = head
+                    parts = tz.split(":")
+                    offset_hours = -(int(parts[0]) + int(parts[1]) / 60)
+            dt = datetime.fromisoformat(s)
+            # 把 naive datetime 当作 UTC，再减去偏移量得到实际 UTC 时间戳
+            utc_dt = dt.replace(tzinfo=timezone.utc)
+            return int(utc_dt.timestamp()) - int(offset_hours * 3600)
         except (ValueError, TypeError):
             return 0
     return 0
