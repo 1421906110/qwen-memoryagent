@@ -268,6 +268,11 @@ class CogniMem:
                     "fact": f"{f.subject} {f.predicate} {f.object}",
                     "confidence": f.confidence,
                     "type": f.fact_type,
+                    # ★ 来源引用（受 RuleMemory provenance 启发）
+                    "citation": f.citation,
+                    "source_label": f.source_label,
+                    # ★ 过期警告（受 RuleMemory stale-assumption 检测启发）
+                    "stale_warning": f.stale_warning,
                 }
                 for f in result["facts"]
             ],
@@ -275,6 +280,7 @@ class CogniMem:
                 {
                     "belief": f"{f.subject} {f.predicate} {f.object}",
                     "confidence": f.confidence,
+                    "citation": f.citation,
                 }
                 for f in beliefs[:3]
             ],
@@ -282,7 +288,8 @@ class CogniMem:
                 {
                     "fact": f"{f.subject} {f.predicate} {f.object}",
                     "confidence": f.confidence,
-                    "note": "这条我不太确定，需要你确认"
+                    "note": "这条我不太确定，需要你确认",
+                    "citation": f.citation,
                 }
                 for f in uncertainties[:3]
             ],

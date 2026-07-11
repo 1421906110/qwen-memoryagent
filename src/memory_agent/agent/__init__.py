@@ -205,10 +205,24 @@ class ToolRegistry:
 
         ⭐ v2.1: 自动自验证（0 Token，纯程序检查）
         工具执行后立刻验证结果真实性，避免 LLM "打嘴炮"。
+
+        ⭐ v2.2: 前置验证器（来自 Emma Agent Firewall + Rubik 验证器）
+        工具执行前做安全验证，防止路径穿越/危险命令/内网访问。
         """
         tool = self._tools.get(name)
         if not tool:
             return {"error": f"Unknown tool: {name}"}
+
+        # ═══ 🔐 前置验证：在工具执行前检查参数安全性（0 Token） ═══
+        from memory_agent.agent.validator import validate_tool_call
+        ok, reason = validate_tool_call(name, args)
+        if not ok:
+            logger.warning("⛔ 前置验证拦截 %s: %s", name, reason)
+            return {
+                "error": f"❌ 安全验证未通过: {reason}",
+                "_verified": False,
+                "_blocked": True,
+            }
 
         logger.info("🧰 Tool call: %s(%s)", name, json.dumps(args)[:200])
         try:
@@ -943,7 +957,7 @@ class Agent:
             except Exception as e:
                 logger.debug("Active learning fetch failed: %s", e)
 
-        # Memory governance
+        # Memory governance v2.0 (六维信号过滤 + 治理报告)
         governor = MemoryGovernor()
         governed = governor.filter(recalled)
         safe = [
@@ -956,6 +970,13 @@ class Agent:
             logger.info("Governance: %d passed, %d demoted, %d blocked",
                         len(safe), demoted, blocked)
         ctx.memories_injected = len(safe)
+
+        # ★ v2.0: 生成治理摘要（注入 prompt 增加透明度）
+        governance_report = governor.governance_summary(recalled)
+        if "demoted" in governance_report or "拦截" in governance_report:
+            # 有明显治理动作才注入，减少 token 浪费
+            safe.insert(0, {"__governance_report": governance_report})
+
         return safe, active_questions
 
     # ── ⭐ 从经验学习 ──
@@ -1092,33 +1113,61 @@ class Agent:
             question_note += "\n（只在相關話題出現時問，不要突然打斷用戶）"
             system += question_note
 
-        # Inject CogniMem memories as context — natural phrasing
+        # Inject CogniMem memories as context — natural phrasing + source citation
         if memories:
             memory_lines = []
+            has_warnings = False
             for m in memories[:8]:
+                # Skip governance report (injected separately)
+                if "__governance_report" in m:
+                    continue
                 subj = m.get("subject", "")
                 pred = m.get("predicate", "")
                 obj = m.get("object", "")
                 conf = m.get("confidence", 0.5)
                 fact_type = m.get("fact_type", "observation")
                 if subj and pred and obj:
-                    # Natural phrasing: "你喜歡喝美式咖啡" not "[preference|0.9] 用戶 喜歡 美式咖啡"
                     if subj in ("user", "用户", "你"):
                         prefix = "你"
                     else:
                         prefix = subj
-                    memory_lines.append(f"- {prefix}{pred}{obj}")
+                    fact_line = f"- {prefix}{pred}{obj}"
+
+                    # ★ 来源引用（受 RuleMemory provenance 启发）
+                    citation = m.get("citation", "")
+                    if citation:
+                        fact_line += f" ——{citation}"
+
+                    # ★ 过期警告（受 RuleMemory stale-assumption 启发）
+                    stale_warning = m.get("stale_warning", "")
+                    if stale_warning:
+                        fact_line += f" {stale_warning}"
+                        has_warnings = True
+
+                    memory_lines.append(fact_line)
                 else:
                     content = m.get("fact") or m.get("content", "")
                     if content:
                         memory_lines.append(f"- {content}")
 
+            # ★ Governance report injection (if any memory was demoted/blocked)
+            for m in memories:
+                if "__governance_report" in m:
+                    memory_lines.append("")
+                    memory_lines.append(m["__governance_report"])
+                    break
+
             if memory_lines:
                 system += (
                     "\n\n## 🧠 我記得的\n"
                     "下面是我记忆中与当前对话相关的信息。自然地融入对话中，不要生硬列出來：\n"
-                    + "\n".join(memory_lines[:6])
+                    + "\n".join(memory_lines[:10])
                 )
+                if has_warnings:
+                    system += (
+                        "\n\n⚠️ **注意**：以上部分记忆可能已过期或存在矛盾，"
+                        "使用时可向用户委婉确认。"
+                    )
 
         # ⭐ 从经验学习：注入过去的教训
         if lessons:

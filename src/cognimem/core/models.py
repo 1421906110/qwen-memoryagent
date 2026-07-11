@@ -114,8 +114,69 @@ class FactTriple:
                         "user_confirmation": "用户确认",
                         "agent_inference": "AI推断",
                         "tool_result": "工具结果",
-                        "system": "系统"}.get(src, src)
+                        "system": "系统",
+                        "memory_abstraction": "记忆归纳"}.get(src, src)
         return "未知"
+
+    @property
+    def citation(self) -> str:
+        """
+        可引用的来源格式（受 RuleMemory provenance 启发）。
+        格式: 记忆#ID简称「来源标签」N分钟前
+        示例: 记忆#a1b2c3d4「用户陈述」5分钟前
+        """
+        now = datetime.now(timezone.utc)
+        time_ago = ""
+        try:
+            created = datetime.fromisoformat(self.created_at)
+            diff_sec = (now - created).total_seconds()
+            if diff_sec < 60:
+                time_ago = "刚刚"
+            elif diff_sec < 3600:
+                time_ago = f"{int(diff_sec//60)}分钟前"
+            elif diff_sec < 86400:
+                time_ago = f"{int(diff_sec//3600)}小时前"
+            else:
+                time_ago = f"{int(diff_sec//86400)}天前"
+        except (ValueError, TypeError):
+            time_ago = "未知时间"
+        return f"记忆#{self.fact_id[:8]}「{self.source_label}」{time_ago}"
+
+    @property
+    def stale_warning(self) -> str | None:
+        """
+        过期警告（受 RuleMemory stale-assumption 检测启发）。
+        返回 None 表示不过期，返回字符串表示有警告。
+        当置信度低于 0.3 或超过半衰期时过期。
+        """
+        if self.confidence < 0.2:
+            return "⚠️ 此记忆已几乎遗忘（置信度过低）"
+        if self.confidence < 0.3:
+            return "⚠️ 此记忆可能已不准确（置信度偏低）"
+        # 检查超过半衰期
+        try:
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            accessed = datetime.fromisoformat(self.accessed_at)
+            days = max(0, (now - accessed).total_seconds() / 86400)
+            hl = 90.0 if self.encoding_level == "abstraction" else \
+                 60.0 if self.encoding_level == "core" else \
+                 30.0 if self.confidence >= 0.6 else \
+                 14.0 if self.confidence >= 0.3 else 7.0
+            if self.access_count > 10:
+                hl *= 1.5
+            elif self.access_count > 5:
+                hl *= 1.2
+            if days > hl * 2:  # 超过 2 倍半衰期
+                return f"⚠️ 此记忆已超过有效期（{int(days)}天未使用）"
+            if days > hl:
+                return f"⏳ 此记忆记忆模糊（{int(days)}天未确认）"
+        except (ValueError, TypeError):
+            pass
+        # 矛盾标记
+        if self.contradictions:
+            return f"⚠️ 此记忆存在 {len(self.contradictions)} 条矛盾记录"
+        return None
 
 
 @dataclass

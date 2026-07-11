@@ -266,60 +266,126 @@ class RecallRouter:
     def _rank_and_trim(self, facts: list[FactTriple], top_k: int,
                         query: str = "", session_id: str = "") -> list[FactTriple]:
         """
-        ⭐ 上下文感知排序。
+        ⭐ 六维上下文感知排序（6-Dimension Scoring）。
 
-        评分 = 置信度(45%) + 重要性(15%) + 新鲜度(20%) + 相关度(10%)
-               + 证据权重(10%) + 同会话加分(额外)
+        受 ERINYS 6-signal + NaLog Blend Score 启发：
+        评分 = 置信度(30%) + 重要性(10%) + 新鲜度(15%)
+               + 相关度(15%) + 证据溯源(10%) + 过期度惩罚(10%)
+               + 矛盾状态(5%) + 同会话加分(5%)
 
-        - 新鲜度: 越近访问的事实分越高（艾宾浩斯复习效应）
-        - 相关度: 查询与事实的语义匹配度
-        - 证据权重: 有原始来源的事实更可靠
-        - 同会话加分: 本对话中产生的事实优先
+        ★ 六维 vs 旧版三维：
+        - 新增「过期度惩罚」：半衰期越远，扣分越多 → 避免用过期记忆做决策
+        - 新增「矛盾状态」：有 pending 矛盾的记忆降权 → 避免矛盾信息污染上下文
+        - 新增「证据溯源」：用户陈述 > 工具结果 > AI 推断 → 不同来源不同权重
+        - 改进「相关度」：从简单 difflib 改为 difflib + 关键词命中多级评分
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         q = query.lower().strip() if query else ""
 
-        def score(f: FactTriple) -> float:
-            # 置信度 (45%)
-            s = f.confidence * 0.45
+        # ── 1. 半衰期配置（与 fact_network._apply_decay 保持一致）──
+        _HALF_LIFE_MAP = {
+            "abstraction": 60.0,
+            "core": 90.0,
+        }
 
-            # 重要性 (15%)
-            s += f.importance * 0.15
+        def _calc_staleness(f: FactTriple, now_dt: datetime) -> float:
+            """
+            计算过期度 (0~1, 越高越过期)。
 
-            # ⭐ 新鲜度 (20%): 越近访问越高
+            半衰期 = f(编码层级, 置信度, 访问频率)
+            天数 / 半衰期 → 指数映射为 0~1 的惩罚值。
+            """
             try:
                 accessed = datetime.fromisoformat(f.accessed_at)
-                days = max(0, (now - accessed).days)
+                days = max(0, (now_dt - accessed).total_seconds() / 86400)
+            except (ValueError, TypeError):
+                return 0.0
+
+            if days <= 0:
+                return 0.0
+
+            # 确定半衰期（天）
+            hl = _HALF_LIFE_MAP.get(f.encoding_level, None)
+            if hl is None:
+                if f.confidence >= 0.6:
+                    hl = 30.0
+                elif f.confidence >= 0.3:
+                    hl = 14.0
+                else:
+                    hl = 7.0
+
+            # 访问频率修正
+            if f.access_count > 10:
+                hl *= 1.5
+            elif f.access_count > 5:
+                hl *= 1.2
+
+            # stigma = 1 − 2^(−天数/半衰期)  → 半衰期时 stigma=0.5
+            import math
+            stigma = 1.0 - (0.5 ** (days / hl))
+            return min(1.0, stigma)
+
+        def score(f: FactTriple) -> float:
+            # ★ ① 置信度 (30%) — 高置信优先
+            s = f.confidence * 0.30
+
+            # ★ ② 重要性 (10%) — 重要知识优先
+            s += f.importance * 0.10
+
+            # ★ ③ 新鲜度 (15%) — 越近访问越高
+            try:
+                accessed = datetime.fromisoformat(f.accessed_at)
+                days = max(0, (now - accessed).total_seconds() / 86400)
                 recency = 1.0 / (1.0 + days * 0.5)
             except (ValueError, TypeError):
                 recency = 0.3
-            s += recency * 0.2
+            s += recency * 0.15
 
-            # ⭐ 相关度 (10%)
+            # ★ ④ 相关度 (15%) — 多级匹配
             if q:
                 import difflib
                 fact_text = f"{f.subject} {f.predicate} {f.object}".lower()
                 if q in fact_text:
                     relevance = 0.9
+                elif any(term in fact_text for term in q.split()):
+                    relevance = 0.7
+                elif q in f.fact_type.lower():
+                    relevance = 0.5
                 else:
                     relevance = difflib.SequenceMatcher(None, q, fact_text).ratio()
-                s += relevance * 0.1
+                s += relevance * 0.15
             else:
                 s += 0.05
 
-            # ⭐ 证据权重 (10%): 有原始来源的事实更可靠
-            has_evidence = bool(f.evidence) and any(
-                hasattr(e, 'statement') and e.statement for e in f.evidence
-            )
-            if has_evidence:
-                s += 0.1
+            # ★ ⑤ 证据溯源 (10%) — 来源可信度分层
+            source_weights = {
+                "user_statement": 1.0,      # 用户明确陈述
+                "user_confirmation": 1.0,   # 用户确认
+                "user_challenge": 0.8,      # 用户质疑（仍算直接）
+                "agent_inference": 0.4,     # AI 推理（可信度较低）
+                "tool_result": 0.7,         # 工具结果
+                "system": 1.0,              # 系统操作
+                "memory_abstraction": 0.6,  # 抽象归纳
+            }
+            source_type = f.evidence[0].source if f.evidence else ""
+            sw = source_weights.get(source_type, 0.5)
+            s += sw * 0.10
 
-            # ⭐ 同会话加分: 本对话产生的记忆优先（项目隔离 + 上下文连贯）
+            # ★ ⑥ 过期度惩罚 (10%) — 超过半衰期越远扣分越多
+            staleness = _calc_staleness(f, now)
+            s += (1.0 - staleness) * 0.10  # 惩罚 = (1−staleness) 扣分
+
+            # ★ ⑦ 矛盾状态 (5%) — 有 pending 矛盾的记忆降权
+            if f.contradictions:
+                s *= 0.95  # 有矛盾直接乘 0.95
+                s -= min(len(f.contradictions) * 0.01, 0.05)  # 多个矛盾叠加扣
+
+            # ★ ⑧ 同会话加分 (5%) — 当前会话产生的记忆优先
             if session_id and f.source_session == session_id:
-                s += 0.15  # 同一会话的事实额外加权
+                s += 0.05
             elif f.source_session:
-                s += 0.05  # 至少有来源会话
+                s += 0.02
 
             return s
 
