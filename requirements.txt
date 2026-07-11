@@ -16,6 +16,7 @@ iniconfig==2.3.0
 Jinja2==3.1.6
 jiter==0.16.0
 MarkupSafe==3.0.3
+mcp>=1.0.0
 numpy==2.5.0
 openai==2.44.0
 packaging==26.2
