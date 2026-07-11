@@ -704,8 +704,40 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/decay-trace/{memory_id}")
-async def decay_trace(memory_id: str, days: int = 30, points: int = 50):
+async def decay_trace(memory_id: str, agent_id: str = "default", days: int = 30, points: int = 50):
     """Visualize confidence decay curve for a specific memory."""
+    # CogniMem mode (direct integration)
+    if cogni is not None:
+        import math
+        # 在指定 agent 中查找事实
+        facts = cogni.fact_network._get_agent_facts(agent_id)
+        target = None
+        for f in facts:
+            if f.fact_id == memory_id:
+                target = f
+                break
+        if not target:
+            raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+
+        half_life = 30.0
+        lam = half_life / (math.log(2) ** (1.0 / 1.5))
+        step = max(1, days // points)
+        trace = []
+        for d in range(0, days + 1, step):
+            cdf = 1.0 - math.exp(-((d / lam) ** 1.5))
+            conf = target.confidence * (1.0 - cdf)
+            trace.append({"day": d, "confidence": round(max(0.0, conf), 4)})
+
+        return {
+            "memory_id": memory_id,
+            "initial_confidence": target.confidence,
+            "half_life_days": half_life,
+            "decay_model": "weibull(k=1.5)",
+            "trace": trace,
+            "days": days,
+        }
+
+    # Fallback: MemoryService
     assert memory_service is not None
     trace = memory_service.compute_decay_trace(memory_id, days=days, points=points)
     if "error" in trace:
@@ -928,6 +960,12 @@ async def process_transcript(req: ProcessTranscriptRequest):
 @app.post("/groom", response_model=GroomResponse)
 async def groom(agent_id: str):
     """Run memory maintenance (decay + prune)."""
+    # CogniMem mode (direct integration) — consolidate handles decay+prune
+    if cogni is not None:
+        result = cogni.consolidate(agent_id)
+        return GroomResponse(status="ok", stats=result)
+
+    # Fallback: MemoryService
     assert memory_service is not None
     stats = memory_service.groom(agent_id)
     return GroomResponse(status="ok", stats=stats)
@@ -944,6 +982,15 @@ async def get_preferences(agent_id: str):
 @app.get("/preferences/history")
 async def preference_history(agent_id: str):
     """Get preference evolution history (including superseded ones)."""
+    # CogniMem mode (direct integration)
+    if cogni is not None:
+        agent_id = _resolve_agent(agent_id)
+        facts = cogni.fact_network._get_agent_facts(agent_id)
+        prefs = [f.to_dict() for f in facts if f.fact_type == "preference"]
+        prefs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        return {"agent_id": agent_id, "history": prefs, "total": len(prefs)}
+
+    # Fallback: MemoryService
     assert memory_service is not None
     history = memory_service.get_preference_history(agent_id)
     return {"agent_id": agent_id, "history": history, "total": len(history)}
@@ -974,6 +1021,14 @@ async def merge_memories(
     Clusters memories by semantic similarity, then merges each cluster
     into a single aggregated memory using LLM summarization.
     """
+    # CogniMem mode (direct integration) — consolidate handles merge
+    if cogni is not None:
+        result = cogni.consolidate(agent_id)
+        return {"status": "ok", "merged": result.get("merged", 0),
+                "abstracted": result.get("abstracted", 0),
+                "message": "已通过 consolidate 完成合并"}
+
+    # Fallback: MemoryService
     assert memory_service is not None
     stats = memory_service.merge_all(
         agent_id=agent_id,

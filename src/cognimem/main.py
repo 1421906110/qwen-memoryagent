@@ -19,6 +19,7 @@ CogniMem API — FastAPI 服务层
 
 import os
 import logging
+import uuid
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -165,11 +166,79 @@ async def api_stats(agent_id: str = "default"):
     return brain.get_stats(agent_id)
 
 
+
+@app.get("/health")
+async def api_health():
+    """引擎健康检测"""
+    import time
+    checks = {}
+    issues = []
+    score = 100
+
+    # DB 状态
+    if db:
+        try:
+            conn = db._get_conn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            db._put_conn(conn)
+            checks["db"] = "✅"
+            # 表是否存在
+            with db._plain_cursor_ctx() as cur:
+                cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'facts')")
+                checks["has_tables"] = "✅" if cur.fetchone()[0] else "⚠️"
+        except Exception as e:
+            checks["db"] = f"⚠️ {e}"
+            issues.append({"type": "db", "detail": str(e)[:60], "severity": "high"})
+            score -= 20
+    else:
+        checks["db"] = "🧠 内存模式（无数据库）"
+
+    # Brain 状态
+    if brain:
+        try:
+            stats = brain.get_stats("default")
+            checks["brain"] = {
+                "total_facts": stats.get("total_facts", 0),
+                "core_beliefs": stats.get("core_beliefs", 0),
+                "contradictions": stats.get("contradictions", 0),
+            }
+        except Exception as e:
+            checks["brain"] = f"⚠️ {e}"
+            issues.append({"type": "brain", "detail": str(e)[:60], "severity": "high"})
+            score -= 20
+    else:
+        checks["brain"] = "❌ 未初始化"
+        score -= 50
+
+    score = max(0, min(100, score))
+    level = "healthy" if score >= 80 else "warning" if score >= 50 else "critical"
+    return {
+        "service": "CogniMem",
+        "version": "0.2.0",
+        "score": score,
+        "level": level,
+        "checks": checks,
+        "issues": issues,
+        "timestamp": time.time(),
+    }
+
+
 @app.get("/versions/{fact_id}")
 async def api_versions(fact_id: str):
     """获取事实的版本历史 → 追溯每次变更的原因和置信度变化"""
-    versions = brain.fact_network.get_versions(fact_id)
-    return {"fact_id": fact_id, "versions": versions, "count": len(versions)}
+    # UUID 校验：非法格式返回 400
+    try:
+        uuid.UUID(fact_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail=f"非法 UUID 格式: {fact_id}")
+
+    try:
+        versions = brain.fact_network.get_versions(fact_id)
+        return {"fact_id": fact_id, "versions": versions, "count": len(versions)}
+    except Exception as e:
+        logger.error("获取版本历史失败: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 class AnalyzeContradictionRequest(BaseModel):
