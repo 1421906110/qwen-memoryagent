@@ -633,12 +633,16 @@ function createAgent() {
   if (!name) return;
   const d = D();
   const aid = 'agt_' + id();
+  const sid = 'ses_' + id();
   d.agents[aid] = { name, created: Date.now(), sessions: {} };
+  // ⭐ 自动创建一个空会话，避免第一枪在 sendMsg 里临时创建造成竞态
+  d.agents[aid].sessions[sid] = { title: '新对话', created: Date.now(), msgs: [] };
   d.activeAgent = aid;
-  d.activeSession = '';
+  d.activeSession = sid;
   S(d);
   document.querySelector('.modal-overlay')?.remove();
   renderAll();
+  document.getElementById('msg-input')?.focus();
 }
 
 // ── Session ──

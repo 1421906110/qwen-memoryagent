@@ -587,9 +587,10 @@ async def chat_stream(req: ChatRequest):
         ]
         is_simple = (len(msg) < 10) and not any(v in msg.lower() for v in ACTION_WORDS)
 
-        if is_simple:
-            full_text = ""
-            try:
+        try:
+            if is_simple:
+                # ⭐ 简单路径：先试流式（速度快、首 token 秒出）
+                full_text = ""
                 stream = llm.chat_stream(
                     messages=llm_messages,
                     system_prompt=None,
@@ -600,14 +601,29 @@ async def chat_stream(req: ChatRequest):
                     full_text += token
                     yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
+                # ⭐ 空响应保护：LLM 返回空时自动降级到 Agent 路径
+                if not full_text.strip():
+                    logger.warning("🛑 LLM returned empty for simple query — falling back to agent")
+                    _record_api_call(success=False, error_msg="empty_response")
+                    result = agent.chat(
+                        message=req.message,
+                        agent_id=req.agent_id,
+                        session_id=req.session_id,
+                        temperature=0.5,
+                    )
+                    reply = result.get("reply", "")
+                    if reply:
+                        yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
+                    else:
+                        reply = "你好！我是小明，有什么可以帮你的？"
+                        yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+                    return
+
                 _record_api_call(success=True)
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
-            except Exception as e:
-                _record_api_call(success=False, error_msg=str(e))
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:200]})}\n\n"
-        else:
-            logger.info("Complex task detected — using agent loop")
-            try:
+            else:
+                logger.info("Complex task detected — using agent loop")
                 result = agent.chat(
                     message=req.message,
                     agent_id=req.agent_id,
@@ -617,6 +633,11 @@ async def chat_stream(req: ChatRequest):
                 reply = result.get("reply", "")
                 memories_stored = result.get("memories_stored", 0)
 
+                # ⭐ Agent 空响应保护
+                if not reply.strip():
+                    logger.warning("🛑 Agent returned empty reply — using fallback")
+                    reply = "你好！我是小明，有什么可以帮你的？"
+
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 tools = result.get("tools_called", 0)
                 if tools > 0:
@@ -625,10 +646,23 @@ async def chat_stream(req: ChatRequest):
                     yield f"data: {json.dumps({'type': 'meta', 'content': f'🧠 +{memories_stored} 条记忆'})}\n\n"
                 _record_api_call(success=True)
                 yield f"data: {json.dumps({'type': 'done', 'content': '', 'tools_called': tools, 'memories_stored': memories_stored})}\n\n"
-            except Exception as e:
-                _record_api_call(success=False, error_msg=str(e))
-                logger.exception("Agent chat failed")
-                yield f"data: {json.dumps({'type': 'error', 'content': str(e)[:200]})}\n\n"
+        except Exception as e:
+            _record_api_call(success=False, error_msg=str(e))
+            # ⭐ 异常时也尝试降级到 Agent 路径
+            logger.warning("🛑 chat_stream error — trying agent fallback: %s", e)
+            try:
+                result = agent.chat(
+                    message=req.message,
+                    agent_id=req.agent_id,
+                    session_id=req.session_id,
+                    temperature=0.5,
+                )
+                reply = result.get("reply", "") or "抱歉，我遇到了一个暂时的问题，请再试一次。"
+                yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+            except Exception as e2:
+                logger.exception("Agent fallback also failed: %s", e2)
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e2)[:200]})}\n\n"
 
     return StreamingResponse(
         event_stream(),
