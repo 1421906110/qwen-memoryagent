@@ -533,7 +533,7 @@ def _build_context(
         ]
 
     # ── 系统提示词 + 图谱注入 ──
-    system = "你是小明，带长期记忆的 AI 助手。简洁直接。\n⚠️ 你叫小明。\n"
+    system = "你是小明，带长期记忆的 AI 助手。简洁直接。\n⚠️ 你叫小明。\n你的能力：搜索信息、查网页、读写文件、运行代码、执行命令、记住用户偏好和事实。\n"
 
     if recalled:
         lines = []
@@ -585,7 +585,10 @@ async def chat_stream(req: ChatRequest):
             "search", "find", "fetch", "read", "write",
             "edit", "create", "analyze", "install",
         ]
-        is_simple = (len(msg) < 10) and not any(v in msg.lower() for v in ACTION_WORDS)
+        has_action = any(v in msg.lower() for v in ACTION_WORDS)
+        # 简单问答 = 没有动作关键词的非长文本
+        # 即使超过 10 字，只要不要求执行动作，就走 LLM 流式（更快、更自然）
+        is_simple = (len(msg) < 60) and not has_action
 
         try:
             if is_simple:
@@ -615,7 +618,8 @@ async def chat_stream(req: ChatRequest):
                     if reply:
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                     else:
-                        reply = "你好！我是小明，有什么可以帮你的？"
+                        # 通用兜底：至少尊重用户的问题
+                        reply = f"我是小明！你刚才问的是「{req.message[:30]}」，让我直接回答你——我能帮你搜索信息、查找网页、读写文件、运行代码、记住事情，还有更多能力。有什么具体需求尽管说！"
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                     yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
                     return
@@ -636,7 +640,12 @@ async def chat_stream(req: ChatRequest):
                 # ⭐ Agent 空响应保护
                 if not reply.strip():
                     logger.warning("🛑 Agent returned empty reply — using fallback")
-                    reply = "你好！我是小明，有什么可以帮你的？"
+                    reply = (
+                        f"我是小明！你刚刚说「{req.message[:40]}」，"
+                        "我听到了。我不确定你需要什么具体操作——"
+                        "我可以帮你搜索信息、看网页、读写文件、或者记住事情。"
+                        "直接告诉我想干什么就行！"
+                    )
 
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 tools = result.get("tools_called", 0)
@@ -694,9 +703,17 @@ async def chat(req: ChatRequest):
             temperature=0.5,
             messages=recent,  # 只传最近2轮
         )
+        reply = result.get("reply", "")
+        if not reply.strip():
+            reply = (
+                f"我是小明！你刚刚说「{req.message[:40]}」，"
+                "我不太确定需要做什么具体操作。"
+                "我可以搜索信息、看网页、读写文件、或者记住事情。"
+                "直接告诉我想干什么就行！"
+            )
         return {
             "agent_id": req.agent_id,
-            "reply": result.get("reply", ""),
+            "reply": reply,
             "memories_used": result.get("memories_used", 0),
             "tools_called": result.get("tools_called", 0),
             "iterations": result.get("iterations", 0),
