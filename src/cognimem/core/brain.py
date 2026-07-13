@@ -125,6 +125,7 @@ class CogniMem:
             return {"status": "no_facts_extracted", "facts": []}
 
         # ⭐ 增强证据链：每条事实都带原始来源文本
+        # 必须在原文保底检查之前运行，否则空 evidence 的 fact 会导致保底误判追加重复
         for f in facts:
             has_source = False
             for ev in f.evidence:
@@ -136,9 +137,31 @@ class CogniMem:
                     source=source or source_type,
                     statement=text[:300],  # 保留原文前300字
                 ))
-            # ⭐ 记录来源会话
             if source and source.startswith("session:"):
                 f.source_session = source
+
+        # ⭐ 原文保底：证据链已补齐，检查原文是否可搜索
+        # 防止规则匹配只截取部分内容导致关键字丢失（如"负责消息队列中间件"丢了"消息队列"）
+        # ⚠️ 用正常化空格后再比，避免 evidence 保存时多空格导致匹配失败 → 追加重复
+        _norm = lambda s: ' '.join(s.split())
+        has_original = any(
+            isinstance(ev, EvidenceItem) and _norm(text[:100]) in _norm(ev.statement)
+            for f in facts for ev in f.evidence
+        )
+        if not has_original:
+            # 简单抽取标签（不依赖 extractor 实例）
+            _keywords = [w for w in text.split() if len(w) >= 2][:5]
+            facts.append(FactTriple(
+                subject="用户",
+                predicate="说了",
+                object=text[:500],
+                agent_id=agent_id,
+                fact_type="observation",
+                confidence=0.5,
+                source_session=source,
+                context_tags=_keywords if _keywords else None,
+                evidence=[EvidenceItem(source=source or "unknown", statement=text[:300])],
+            ))
 
         # 3. 批量添加 (含矛盾检测 + 来源权重)
         results = self.fact_network.batch_add(facts, agent_id, source_type)

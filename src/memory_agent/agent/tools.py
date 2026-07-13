@@ -109,12 +109,20 @@ def tool_write_file(tool_call_id: str, args: dict,
                     ctx: "AgentContext") -> dict:
     """Write content to a file (overwrite)."""
     path = Path(args["path"]).expanduser().resolve()
-    content = args["content"]
+    content = args.get("content", "")
 
     # Safety check
     for forbidden in ["/etc", "/sys", "/proc", "/dev"]:
         if str(path).startswith(forbidden):
             return {"error": f"Refusing to write to system path: {forbidden}"}
+
+    # ⭐ 拒绝空内容：防止 LLM 打嘴炮说"已写入"但实际写空文件
+    if not content or not content.strip():
+        return {
+            "error": "写入内容为空。请提供完整的文件内容再调用 write_file。",
+            "path": str(path),
+            "content_empty": True,
+        }
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

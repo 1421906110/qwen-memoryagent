@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+import asyncio
+import functools
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -491,6 +493,42 @@ async def recall(req: RecallRequest):
     }
 
 
+@app.post("/ask")
+async def api_ask(query: str = "", agent_id: str = "default"):
+    """问答式召回（Agent 友好）
+
+    返回相关记忆、核心信念、不确定项、矛盾提醒、主动学习问题。
+    与 /recall 的区别：返回结构化信息（含信念/矛盾/不确定）+ 主动学习引导。
+    """
+    if cogni is None:
+        return {
+            "agent_id": agent_id, "query": query,
+            "relevant_memories": [], "core_beliefs": [],
+            "uncertainties": [], "active_questions": [],
+            "contradictions_warning": False,
+        }
+    try:
+        agent_id = _resolve_agent(agent_id)
+        result = cogni.ask(query=query, agent_id=agent_id)
+        # 序列化 FactTriple 对象
+        if "relevant_memories" in result:
+            for m in result["relevant_memories"]:
+                for k in ("citation", "stale_warning", "source_label"):
+                    v = m.get(k)
+                    if hasattr(v, 'to_dict'):
+                        m[k] = v.to_dict()
+        return result
+    except Exception as e:
+        logger.warning("ask failed: %s", e)
+        return {
+            "agent_id": agent_id, "query": query,
+            "relevant_memories": [], "core_beliefs": [],
+            "uncertainties": [], "active_questions": [],
+            "contradictions_warning": False,
+            "error": str(e)[:200],
+        }
+
+
 # ══════════════════════════════════════════════════════════
 #  上下文引擎 — 不用压缩，CogniMem 就是压缩器
 # ══════════════════════════════════════════════════════════
@@ -523,17 +561,19 @@ def _build_context(
         except Exception as e:
             logger.warning("Memory recall failed: %s", e)
 
-    # ── L1: 最近 1 轮原文（仅保连贯）──
+    # ── L1: 最近多轮原文（保连贯）──
     recent = []
     if conversation_history:
+        # 最多保留最近 10 条消息（5轮完整对话）
+        # ⚠️ 前端存 role='agent'，但 LLM API 只认 role='assistant'，必须映射
         recent = [
-            {"role": m["role"], "content": m["content"][:500]}
-            for m in conversation_history[-2:]  # 最近 1 轮 user+assistant
+            {"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
+            for m in conversation_history[-10:]
             if m.get("content")
         ]
 
     # ── 系统提示词 + 图谱注入 ──
-    system = "你是小明，带长期记忆的 AI 助手。简洁直接。\n⚠️ 你叫小明。\n你的能力：搜索信息、查网页、读写文件、运行代码、执行命令、记住用户偏好和事实。\n"
+    system = "你是小明，带长期记忆的 AI 助手。简洁直接。\n⚠️ 你叫小明。\n你的能力：搜索信息、查网页、**直接在你的电脑上读写文件**、运行代码、执行命令、记住用户偏好和事实。用户叫你写文件一定要用 write_file 工具，不要光给代码让用户自己复制！\n"
 
     if recalled:
         lines = []
@@ -550,8 +590,12 @@ def _build_context(
             system += "\n🧠 我记得\n" + "\n".join(lines) + "\n"
 
     msgs = [{"role": "system", "content": system}]
-    msgs.extend(recent)
-    msgs.append({"role": "user", "content": user_message})
+    # 如果 recent 最后一条就是当前 user 消息，跳过重复
+    if recent and recent[-1]["role"] == "user" and recent[-1]["content"] == user_message[:500]:
+        msgs.extend(recent)
+    else:
+        msgs.extend(recent)
+        msgs.append({"role": "user", "content": user_message})
 
     return system, msgs
 
@@ -581,14 +625,18 @@ async def chat_stream(req: ChatRequest):
             "搜", "搜索", "查", "查找", "爬", "下载", "读取",
             "写入", "编辑", "分析", "对比", "创建", "写", "生成",
             "改", "删", "跑", "试", "调用", "执行", "运行",
-            "总结", "翻译", "推荐", "做", "画", "整理", "记住", "计算",
+            "总结", "翻译", "推荐", "画", "整理", "记住", "计算",
             "search", "find", "fetch", "read", "write",
             "edit", "create", "analyze", "install",
         ]
+        # ⭐ 继续/下一步 → 必须进 Agent 路径（否则不能调工具继续写文件等操作）
+        IS_CONTINUATION = (
+            msg in ("继续", "继续！", "继续执行") or msg.startswith("继续")
+            or msg in ("next", "continue", "go on", "下一步", "然后呢")
+        )
         has_action = any(v in msg.lower() for v in ACTION_WORDS)
-        # 简单问答 = 没有动作关键词的非长文本
-        # 即使超过 10 字，只要不要求执行动作，就走 LLM 流式（更快、更自然）
-        is_simple = (len(msg) < 60) and not has_action
+        # 简单问答 = 没有动作关键词 + 非继续 + 非长文本
+        is_simple = (len(msg) < 60) and not has_action and not IS_CONTINUATION
 
         try:
             if is_simple:
@@ -608,12 +656,22 @@ async def chat_stream(req: ChatRequest):
                 if not full_text.strip():
                     logger.warning("🛑 LLM returned empty for simple query — falling back to agent")
                     _record_api_call(success=False, error_msg="empty_response")
-                    result = agent.chat(
+                    # ⭐ 子线程执行，不阻塞事件循环
+                    _loop = asyncio.get_running_loop()
+                    _agent_fn = functools.partial(
+                        agent.chat,
                         message=req.message,
                         agent_id=req.agent_id,
                         session_id=req.session_id,
                         temperature=0.5,
+                        messages=req.messages,
                     )
+                    _agent_future = _loop.run_in_executor(None, _agent_fn)
+                    while not _agent_future.done():
+                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                        if not _agent_future.done():
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    result = _agent_future.result()
                     reply = result.get("reply", "")
                     if reply:
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
@@ -628,12 +686,24 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             else:
                 logger.info("Complex task detected — using agent loop")
-                result = agent.chat(
+                # ⭐ 在子线程运行 agent.chat()，不阻塞事件循环
+                # SSE 连接 15s 无数据会超时 → 每 15s 发心跳保活
+                _loop = asyncio.get_running_loop()
+                _agent_fn = functools.partial(
+                    agent.chat,
                     message=req.message,
                     agent_id=req.agent_id,
                     session_id=req.session_id,
                     temperature=0.5,
+                    messages=req.messages,
                 )
+                _agent_future = _loop.run_in_executor(None, _agent_fn)
+                # 心跳循环：等 agent 完成，每 15s 发 keepalive 防超时
+                while not _agent_future.done():
+                    _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                    if not _agent_future.done():
+                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                result = _agent_future.result()
                 reply = result.get("reply", "")
                 memories_stored = result.get("memories_stored", 0)
 
@@ -660,12 +730,22 @@ async def chat_stream(req: ChatRequest):
             # ⭐ 异常时也尝试降级到 Agent 路径
             logger.warning("🛑 chat_stream error — trying agent fallback: %s", e)
             try:
-                result = agent.chat(
+                # ⭐ 子线程执行，不阻塞事件循环
+                _loop = asyncio.get_running_loop()
+                _agent_fn = functools.partial(
+                    agent.chat,
                     message=req.message,
                     agent_id=req.agent_id,
                     session_id=req.session_id,
                     temperature=0.5,
+                    messages=req.messages,
                 )
+                _agent_future = _loop.run_in_executor(None, _agent_fn)
+                while not _agent_future.done():
+                    _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                    if not _agent_future.done():
+                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                result = _agent_future.result()
                 reply = result.get("reply", "") or "抱歉，我遇到了一个暂时的问题，请再试一次。"
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
@@ -694,14 +774,14 @@ async def chat(req: ChatRequest):
         # Agent 模式：传压缩后的最近消息
         recent = []
         if req.messages:
-            recent = [{"role": m["role"], "content": m["content"][:500]}
-                      for m in req.messages[-4:] if m.get("content")]
+            recent = [{"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
+                      for m in req.messages[-10:] if m.get("content")]
         result = agent.chat(
             message=req.message,
             agent_id=req.agent_id,
             session_id=req.session_id,
             temperature=0.5,
-            messages=recent,  # 只传最近2轮
+            messages=recent,
         )
         reply = result.get("reply", "")
         if not reply.strip():

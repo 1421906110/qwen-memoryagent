@@ -990,7 +990,8 @@ function sendMsg() {
   document.getElementById('chat-msgs').appendChild(ty);
   scrollB();
 
-  const body = JSON.stringify({agent_id: r.agentId, session_id: r.sessId, message: text, messages: r.sess.msgs.slice(-2).map(m => ({role: m.role, content: m.content}))});
+  // 传全部历史消息（后端自己控制保留多少条）
+  const body = JSON.stringify({agent_id: r.agentId, session_id: r.sessId, message: text, messages: r.sess.msgs.map(m => ({role: m.role, content: m.content}))});
 
   // Try streaming first
   fetch('/chat/stream', {
@@ -1057,6 +1058,13 @@ function sendMsg() {
         readStream();
       }).catch(err => {
         _streaming = false;
+        // 保存部分内容和错误到对话历史
+        const dR = D();
+        const sR = dR.agents[r.agentId]?.sessions?.[r.sessId];
+        if (sR && fullText) {
+          sR.msgs.push({role: 'agent', content: fullText + '\n\n[⚠️ 输出中断: ' + err.message + ']', time: Date.now()});
+          S(dR);
+        }
         const cd = ad.querySelector('.stream-content') || ad;
         cd.textContent = '❌ 流式读取失败: ' + err.message;
       });
@@ -1117,6 +1125,13 @@ function sendMsg() {
     .catch(err => {
       _streaming = false;
       ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+      // 保存错误到对话历史，保证下一轮能看到
+      const dX = D();
+      const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
+      if (sX) {
+        sX.msgs.push({role: 'agent', content: '⚠️ 请求失败: ' + err.message, time: Date.now()});
+        S(dX);
+      }
       const ed = document.createElement('div');
       ed.className = 'msg agent';
       ed.innerHTML = '<div>❌ ' + esc(err.message) + '</div>';

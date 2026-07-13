@@ -410,7 +410,11 @@ class Agent:
             "- 不要问用户「你要搜什么」—— 用用户的话直接搜！\n"
             "- 不要说「我可以但需要开启」—— 直接调用工具！\n"
             "- 不要描述你会怎么做 —— 直接做！\n"
-            "- 不要模拟操作 —— 真的调用工具！\n\n"
+            "- 不要模拟操作 —— 真的调用工具！\n"
+            "- ⚠️ **你可以直接在用户的电脑上写文件！你不是只能聊天！** "
+            "你有 write_file 工具，可以创建任何文件到桌面。"
+            "不要说「我无法直接操作你的电脑」——那是错的！你能！直接用 write_file！\n"
+            "- ⚠️ 写文件时用户桌面路径是 /Users/baikai/Desktop/，不是 /root/Desktop/！\n\n"
             "## 📋 执行流程\n"
             "1. 用户提出请求\n"
             "2. 立即选择对应工具并执行（不犹豫、不确认、不解释）\n"
@@ -462,6 +466,9 @@ class Agent:
             max_iterations=max_iterations,
         )
 
+        # ⭐ 清除跨请求残留的连续错误计数（Agent 是单例，状态跨 chat() 调用残留）
+        self._consecutive_errors = {'count': 0, 'tool': ''}
+
         # ── Step 1: Recall memories + active learning questions ──
         recalled_memories, active_questions = self._recall_memories(message, agent_id, ctx)
 
@@ -512,6 +519,12 @@ class Agent:
             openai_messages = _prune_messages(openai_messages)
 
             # Call LLM with tools
+            # ⭐ 连续错误上限：同一工具连续失败 4 次→停止，避免无限循环
+            if hasattr(self, '_consecutive_errors') and self._consecutive_errors.get('count', 0) >= 4:
+                ctx.state = AgentState.ERROR
+                last_tool = self._consecutive_errors.get('tool', 'unknown')
+                logger.error("⛔ 连续 %d 次错误(%s)，强制停止", self._consecutive_errors['count'], last_tool)
+                return self._error_result(ctx, f"我在调用 {last_tool} 时连续出错，无法继续。请稍后再试或换个方式描述需求。")
             try:
                 response = self.llm.chat_completion(
                     messages=openai_messages,
@@ -605,19 +618,95 @@ class Agent:
                                            "果回复用户，禁止继续搜索。直接给出最终答案。",
                             })
 
+                    # ⭐ 连续错误追踪：同一工具连续失败计数
+                    if "error" in result:
+                        if not hasattr(self, '_consecutive_errors'):
+                            self._consecutive_errors = {'count': 0, 'tool': ''}
+                        if self._consecutive_errors['tool'] == tc.function.name:
+                            self._consecutive_errors['count'] += 1
+                        else:
+                            self._consecutive_errors = {'count': 1, 'tool': tc.function.name}
+                        logger.warning("⚠️ 错误追踪: %s 第%d次失败", tc.function.name,
+                                       self._consecutive_errors['count'])
+
+                        # ⭐ write_file 连续失败 → 自动注入正确路径指令
+                        if (tc.function.name == "write_file"
+                            and self._consecutive_errors['count'] >= 2
+                            and "缺少 path" in str(result.get("error", ""))):
+                            _filename_hint = self._guess_filename(message, openai_messages)
+                            if _filename_hint:
+                                logger.warning("🛑 自动注入路径提示: %s", _filename_hint)
+                                openai_messages.append({
+                                    "role": "user",
+                                    "content": f"【write_file 路径纠正】你调用了 write_file 但缺少 path 参数。"
+                                               f"用户说的路径是: {_filename_hint}。"
+                                               f"请用这个完整路径重新调用 write_file，content 包含完整文件内容。",
+                                })
+                                continue  # 不等到下一次迭代，直接注入提示后 LLM 重试
+
+                        # ⭐ write_file 写空内容 → 自动注入 shell 写入指令
+                        if (tc.function.name == "write_file"
+                            and self._consecutive_errors['count'] >= 2
+                            and "内容为空" in str(result.get("error", ""))):
+                            logger.warning("🛑 write_file 连续空内容，降级到 shell")
+                            openai_messages.append({
+                                "role": "user",
+                                "content": "【写文件降级】write_file 多次写入内容为空。请改用 shell 命令写入："
+                                           "用 cat <<'MAINEOF' > 文件路径 命令写入完整内容。",
+                            })
+                            continue
+                    else:
+                        # 工具成功了→重置计数
+                        if hasattr(self, '_consecutive_errors'):
+                            self._consecutive_errors = {'count': 0, 'tool': ''}
+
             else:
                 # ── Text response from LLM ──
                 text = msg.content or ""
 
                 # If LLM hasn't called any tools yet and returns text,
                 # it's directly answering — treat as final (simple Q&A)
+                # ⚠️ 例外：用户要求写文件/创建/生成 → 不能当简单 Q&A，必须强制调工具
                 if not llm_has_acted:
+                    _is_write_request = any(
+                        kw in message for kw in
+                        ["写", "创建", "生成", "保存", "写入", "放桌面", "写到"]
+                    )
+                    if _is_write_request:
+                        logger.warning("🛑 用户要求写文件但 LLM 只返回文本——强制调用 write_file")
+                        openai_messages.append({
+                            "role": "user",
+                            "content": "【必须调用 write_file】用户要求创建文件。"
+                                       "请立即调用 write_file 工具！content 参数包含完整文件内容，path 给出完整路径。"
+                                       "不要只给描述、不要假装调用了、不要问问题。立即执行！",
+                        })
+                        continue  # 不 break，强制下一轮 LLM 调用工具
                     final_reply = text
                     goal.status = GoalStatus.COMPLETED
                     logger.info("💬 Simple Q&A (no tools needed)")
                     break
 
                 # LLM has done work — check if goal is complete
+
+                # ⭐ 拒绝写文件检测：LLM 说"我无法直接操作你的电脑"——这是错的！
+                _refusal_patterns = ["我无法直接", "无法操作你的电脑", "无法穿透",
+                                      "我在云端", "无法直接写入", "无法隔空",
+                                      "不能直接操作你的电脑", "不能直接写入",
+                                      "没有权限访问你的本地", "无法在你的电脑"]
+                if any(p in text for p in _refusal_patterns):
+                    _req_write = any(kw in message for kw in
+                                      ["写", "创建", "生成", "保存", "放桌面", "写到"])
+                    if _req_write:
+                        logger.warning("🛑 LLM 拒绝写文件: %s", text[:80])
+                        openai_messages.append({
+                            "role": "user",
+                            "content": "【纠正】你说错了！你可以直接在我的电脑上写文件！"
+                                       "你有 write_file 工具，它有完整的文件写入能力。"
+                                       "不需要经过我手动复制。立即调用 write_file！"
+                                       "path 给完整路径，content 给完整内容。立即执行！",
+                        })
+                        continue
+
                 is_search_task = any(kw in message for kw in ["搜", "查", "搜索", "查找", "search", "find"])
                 is_substantive = not self._is_asking_user(text) and len(text) > 50
 
@@ -643,7 +732,8 @@ class Agent:
                         if not pending_write:
                             user_needs_write = any(
                                 kw in message for kw in
-                                ["写到", "写入", "保存到", "创建文件", "写到桌面", "写文件", "输出到"]
+                                ["写到", "写入", "保存到", "创建文件", "写到桌面",
+                                 "写文件", "输出到", "写", "放桌面", "生成", "创建"]
                             )
                             if user_needs_write:
                                 pending_write = True
@@ -661,9 +751,9 @@ class Agent:
                                 logger.warning("🛑 打嘴炮拦截: 剩余步骤需写文件但 write_file 未调用")
                                 openai_messages.append({
                                     "role": "user",
-                                    "content": "【必须调用工具】计划中还有写入文件的步骤未完成。"
-                                               "你的回答很棒，但你需要调用 write_file 工具把内容写到文件里，"
-                                               "不要只给描述内容。请立即执行 write_file。",
+                                    "content": "【必须调用 write_file】计划中还有写入文件的步骤未完成。"
+                                               "请立即调用 write_file 工具，content 参数要包含完整的文件内容，"
+                                               "不要只给描述或空内容。直接写！",
                                 })
                                 continue
                         for i in range(goal.current_step, len(goal.plan)):
@@ -694,8 +784,18 @@ class Agent:
                     # 无计划 → 检查用户是否要求写文件但 LLM 只给描述没调用工具
                     user_needs_write = any(
                         kw in message for kw in
-                        ["写到", "写入", "保存到", "创建文件", "写到桌面", "写文件"]
+                        ["写到", "写入", "保存到", "创建文件", "写到桌面",
+                         "写文件", "写", "放桌面", "生成", "创建"]
                     )
+                    # ⭐ 检查 write_file 是否被调用了但写入了空内容
+                    if user_needs_write:
+                        last_write_empty = any(
+                            isinstance(m, dict) and m.get("role") == "tool"
+                            and "写入内容为空" in m.get("content", "")
+                            for m in openai_messages[-6:]
+                        )
+                    else:
+                        last_write_empty = False
                     if is_substantive and user_needs_write:
                         write_called = any(
                             m.get("role") == "assistant"
@@ -710,9 +810,18 @@ class Agent:
                             logger.warning("🛑 打嘴炮拦截: 用户要求写文件但 write_file 未调用")
                             openai_messages.append({
                                 "role": "user",
-                                "content": "【必须调用工具】用户要求把内容写入文件，但你还没有调用 "
-                                           "write_file 工具。请调用 write_file 把内容写到文件里，"
-                                           "不要只给描述。",
+                                "content": "【必须调用 write_file】用户要求把内容写入文件。"
+                                           "请马上调用 write_file，content 参数包含完整的文件内容，"
+                                           "不要空内容、不要只给描述。立即执行！",
+                            })
+                            continue
+                        elif last_write_empty:
+                            logger.warning("🛑 打嘴炮拦截: write_file 调用了但内容为空——强制重试")
+                            openai_messages.append({
+                                "role": "user",
+                                "content": "【write_file 内容为空】你刚刚调用了 write_file 但 content 是空的！"
+                                           "请重新调用 write_file，把完整的文件内容放到 content 参数中，"
+                                           "不要省略任何内容。立即执行！",
                             })
                             continue
                     if is_substantive:
@@ -757,9 +866,11 @@ class Agent:
                 )
 
         # ── ⭐ 打嘴炮兜底检查：用户要求写文件但 write_file 从未被调用 ──
+        # 注意：必须包含"写"单字！用户说"写个烧烤小程序"也是写文件请求
         user_needs_write = any(
             kw in message for kw in
-            ["写到", "写入", "保存到", "创建文件", "写到桌面", "写文件"]
+            ["写到", "写入", "保存到", "创建文件", "写到桌面",
+             "写文件", "写", "放桌面", "生成", "创建"]
         )
         if user_needs_write and final_reply:
             # 真正检查 write_file 是否在 openai_messages 中被调用过
@@ -771,13 +882,65 @@ class Agent:
                 )
                 for m in openai_messages
             )
-            if not write_file_called and any(
-                kw in final_reply for kw in ["已写到", "已保存", "已写入", "写到桌面"]
+            # ⭐ 即使调用了 write_file，也检查是否真的写入了内容
+            content_written = False
+            if write_file_called:
+                for m in openai_messages:
+                    if isinstance(m, dict) and m.get("role") == "tool":
+                        try:
+                            tool_result = json.loads(m.get("content", "{}"))
+                            if tool_result.get("success") and tool_result.get("bytes_written", 0) > 0:
+                                content_written = True
+                                break
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+            if not content_written and any(
+                kw in final_reply for kw in [
+                    "已写到", "已保存", "已写入", "写到桌面", "已创建",
+                    "已经放桌面", "已经放到", "已经放在", "已经生成",
+                    "文件在桌面", "已经写好", "文件名叫", "已经放好了",
+                    "已放到桌面", "放在桌面", "放到桌面",
+                ]
             ):
-                logger.warning("🛑 打嘴炮兜底: 回复声称已写入但 write_file 从未被调用")
+                if write_file_called and not content_written:
+                    logger.warning("🛑 打嘴炮兜底: write_file 被调用了但写入了空内容")
+                    final_reply = (
+                        "【⚠️ 写入失败】我调用了 write_file 但内容为空。"
+                        "我正在重新生成完整内容并写入，请稍等...\n\n"
+                        + final_reply
+                    )
+                elif not write_file_called:
+                    logger.warning("🛑 打嘴炮兜底: 回复声称已写入但 write_file 从未被调用")
+                    final_reply = (
+                        "【注意】我刚刚在回复中提到了写入文件，但实际上还没有执行写入操作。\n\n"
+                        + final_reply
+                    )
+
+            # ⭐ 物理文件验证：如果回复声称已写入，实际检查文件存在性
+            _claimed_file = self._verify_file_written(user_message=message, openai_messages=openai_messages)
+            if _claimed_file:
+                logger.info("📁 文件验证: %s → %s", _claimed_file["path"],
+                           "✅ 存在" if _claimed_file["exists"] else "❌ 不存在")
+                if not _claimed_file["exists"]:
+                    final_reply = (
+                        f"【⚠️ 写入失败】我回复中提到了写入 `{_claimed_file['path']}`，"
+                        f"但文件实际上不存在。可能是写入工具调用被拦截了。"
+                        f"请再描述一次需求，或手动指定完整路径。"
+                    )
+                elif _claimed_file["empty"]:
+                    final_reply = (
+                        f"【⚠️ 写入不完整】文件 `{_claimed_file['path']}` 已创建但内容为空。"
+                        f"请再描述一次需求，我会重新写入。"
+                    )
+
+            # ⭐ XML 假工具调用检测：LLM 可能在文本里生成 &lt;write_to_file&gt; XML 块而非真正调工具
+            if (not content_written
+                and not write_file_called
+                and ('<write_to_file>' in final_reply or '<write_file>' in final_reply)):
+                logger.warning("🛑 检测到 XML 假工具调用 (<write_to_file>)，但实际未执行")
                 final_reply = (
-                    "【注意】我刚刚在回复中提到了写入文件，但实际上还没有执行写入操作。\n\n"
-                    + final_reply
+                    "【⚠️ 写入未执行】我提到了要创建文件但没有实际写入。"
+                    "让我重新执行一次，请稍等...\n\n"
                 )
 
         # ── Step 5: ⭐ Intelligent Memory Storage ──
@@ -1023,7 +1186,8 @@ class Agent:
             return False  # 短消息 → 简单 Q&A
         # 有明显动作词 → 可能需要规划
         action_indicators = [
-            "搜索", "查找", "查一下", "对比", "分析", "创建", "写一个",
+            "搜索", "查找", "查一下", "对比", "分析", "创建",
+            "写", "写一个", "写个",
             "爬", "下载", "读取", "打开", "写入", "编辑", "安装",
             "search", "find", "compare", "analyze", "create", "write",
             "fetch", "download", "read", "edit", "install",
@@ -1088,12 +1252,20 @@ class Agent:
         """Build the OpenAI-format message list with system prompt + memories + goal."""
         system = self._default_system
 
-        # ⭐ 不再注入历史对话到 system prompt！
-        # 之前的做法是把历史对话塞进 system prompt，导致模型混淆新旧请求。
-        # 例如用户说过"新建文件夹"再问"搜一下"，模型会搜"在桌面新建文件夹 方法"。
-        # 历史对话由 Web UI 维护，agent 只处理当前单条消息。
-        # 如果需要跨对话连续性，由 CogniMem 记忆系统提供。
-        _ = conversation_history  # 显式忽略，避免 lint 警告
+        # ⭐ 历史对话：作为独立消息注入 system 和 user 之间
+        # 之前做法是塞进 system prompt 导致混淆（已废弃）。
+        # 现在放在消息列表里，LLM 能自然区分角色。
+        _history_msgs = []
+        if conversation_history:
+            _history_msgs = [
+                {"role": ("assistant" if m["role"] == "agent" else m["role"]),
+                 "content": m.get("content", "")[:1000]}
+                for m in conversation_history[-6:]
+                if m.get("content")
+            ]
+        # 去重：如果最后一条历史和当前 user 消息相同，跳过
+        if _history_msgs and _history_msgs[-1]["role"] == "user" and _history_msgs[-1]["content"] == user_message[:1000]:
+            _history_msgs = _history_msgs[:-1]
 
         # ⭐ Active learning: 只在合適時機注入矛盾/不確定問題
         # 規則：只有當用戶沒在問具體問題（如"你記得X嗎"）時才注入
@@ -1192,6 +1364,11 @@ class Agent:
                     "⚠️ 用户要搜索！立即调用 web_search，用用户提到的关键词直接搜。\n"
                     "不要问「你想搜什么」。用户已经说了要搜什么。\n"
                 )
+            elif any(kw in user_message for kw in ["写", "创建", "生成", "保存", "写入"]):
+                action_instruction += (
+                    "⚠️ 用户要写文件！立即调用 write_file，content 参数包含完整的文件内容。\n"
+                    "不要只给代码块让用户自己复制！不要省略内容！不要把内容写成空字符串！\n"
+                )
             elif any(kw in user_message for kw in ["分析", "对比", "analyze"]):
                 action_instruction += (
                     "⚠️ 先 read_file 读取文件内容，再分析。直接说发现。\n"
@@ -1205,10 +1382,11 @@ class Agent:
                 "你已經拆好了步驟。按計劃推進，完成所有步驟後再回覆用戶。\n"
             )
 
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_message},
-        ]
+        msgs = [{"role": "system", "content": system}]
+        if _history_msgs:
+            msgs.extend(_history_msgs)
+        msgs.append({"role": "user", "content": user_message})
+        return msgs
 
     def _update_goal_in_system(self, messages: list[dict], goal) -> None:
         """Update the system prompt with current goal progress.
@@ -1333,9 +1511,41 @@ class Agent:
                 if mm.should_store(f"任务步骤结果: {step_text}", source="tool_result"):
                     candidates.append(f"任务步骤结果: {step_text}")
 
+        # ⭐ 检查 LLM 是否已通过 memory_remember 工具存储了相同内容
+        # 避免启发式存储 + LLM主动存储双重写
+        # LLM 会改写原文（"我会"→"用户会"，"和"→"，"），所以需要语义级去重
+        import re as _re_dedup
+        def _core_shingles(s: str, n: int = 4) -> set:
+            """提取字符级 n-gram 用于模糊语义去重。
+            LLM 改写（"我会"→"用户会"）后整词不匹配，但 n-gram 能命中重叠部分。
+            """
+            s = _re_dedup.sub(r'用户信息[:：]?\s*|帮我记住[:：]?\s*|请记住[:：]?\s*|记住了[:：]?\s*', '', s)
+            s = _re_dedup.sub(r'\s+', '', s)
+            return {s[i:i+n] for i in range(len(s)-n+1)} if len(s) >= n else set()
+
+        _already_remembered_shingles = set()
+        for m in openai_messages:
+            if m["role"] == "assistant" and "tool_calls" in m:
+                for tc in m["tool_calls"]:
+                    try:
+                        if tc["function"]["name"] == "memory_remember":
+                            t = json.loads(tc["function"]["arguments"]).get("text", "")
+                            if t:
+                                _already_remembered_shingles.update(_core_shingles(t))
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+
         # Store unique candidates (filtered by MemoryManager)
         seen = set()
         for text in candidates:
+            # ⭐ 如果 LLM 已通过工具存储了相同核心内容，跳过启发式存储
+            # 字符 n-gram 重叠 >= 3 即视为语义重复
+            _sh = _core_shingles(text)
+            _overlap = _sh & _already_remembered_shingles
+            if len(_overlap) >= 3:
+                logger.info("⏭️ 跳过重复存储（LLM 已通过 memory_remember 存储，重叠=%s）: %s",
+                            _overlap, text[:40])
+                continue
             if text not in seen:
                 seen.add(text)
                 try:
@@ -1557,6 +1767,110 @@ class Agent:
         if lesson:
             self._store_lesson(lesson, agent_id)
             logger.info("📝 Lesson stored: %s", lesson[:50])
+
+    def _guess_filename(self, user_message: str, messages: list[dict]) -> str:
+        """Try to guess the filename from user message or tool calls.
+
+        Returns full path hint like /Users/baikai/Desktop/xxx.html or empty string.
+        """
+        import re
+        # 1. Check user message for explicit path
+        msg = user_message
+        # Pattern: 桌面/xxx.html  or  ~/Desktop/xxx.html  or /Users/.../xxx.html
+        m = re.search(r'(?:桌面|~?/Desktop|/Users/\w+/Desktop)\s*/?\s*([^\s,，，。]+\.\w+)', msg)
+        if m:
+            fname = m.group(1).strip()
+            return f"/Users/baikai/Desktop/{fname}"
+
+        # 2. Check for "到桌面 xxx.html" pattern
+        # ⭐ 支持 "到桌面.html"（无空格情况）
+        m = re.search(r'(?:到桌面|写到桌面|放在桌面)\s*(?:一个|的)?\s*([^\s,，。]+\.\w+)', msg)
+        if m:
+            fname = m.group(1).strip()
+            return f"/Users/baikai/Desktop/{fname}"
+        # 2b. "到桌面.html" 无空格
+        m = re.search(r'(?:到桌面)(\.html?)', msg)
+        if m:
+            fname = f"咖啡点餐小程序{m.group(1)}"
+            # 尝试从消息中提取小程序名
+            app_m = re.search(r'([一-鿿]{2,6})(?:点餐|菜单|小程序|应用)', msg)
+            if app_m:
+                fname = f"{app_m.group(1)}点餐小程序{m.group(1)}"
+            return f"/Users/baikai/Desktop/{fname}"
+
+        # 3. Check for "叫xxx" or "名xxx" pattern
+        m = re.search(r'(?:叫|名|文件名)\s*[为:：]?\s*([^\s,，。]+\.\w+)', msg)
+        if m:
+            fname = m.group(1).strip()
+            return f"/Users/baikai/Desktop/{fname}"
+
+        # 4. Check for HTML/htm filename in msg (含中文！)
+        # ⭐ 注意排除 "到桌面""写到桌面" 等指示符，避免吃到文件名里
+        m = re.search(r'([^\s,，。、到]+(?:\.html?|\.htm))', msg)
+        if m:
+            fname = m.group(1).strip()
+            return f"/Users/baikai/Desktop/{fname}"
+
+        # 5. 「放桌面（路径...）」括号里的文件名提示
+        #    用户可能写：放桌面（路径桌面：/Users/baikai/Desktop/）.html
+        m = re.search(r'[（(][^)）]*[）)]\s*\.(\w+)', msg)
+        if m:
+            ext = m.group(1).strip()
+            # 尝试从整个消息中提取文件名关键词（在"写""创建""生成"后的词）
+            name_m = re.search(r'(?:写|创建|生成)\s*(?:个|一|的|一个|了)?\s*([^\s，,。、！]+)', msg)
+            if name_m:
+                fname = name_m.group(1).strip()
+                return f"/Users/baikai/Desktop/{fname}.{ext}"
+
+        # 6. Check if any write_file call succeeded with a path
+        for m in messages:
+            if isinstance(m, dict) and m.get("role") == "tool":
+                try:
+                    tr = json.loads(m.get("content", "{}"))
+                    if tr.get("success") and tr.get("path"):
+                        return tr["path"]
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+        return ""
+
+    def _verify_file_written(self, user_message: str,
+                              openai_messages: list[dict]) -> dict | None:
+        """Check if a file that was claimed to be written actually exists on disk.
+
+        优先从工具调用参数提取（最准确），回退到消息猜测。
+        Returns: {"path": str, "exists": bool, "empty": bool} or None(完全无法判断)
+        """
+        import os as _os
+
+        # 方式 1: 从工具调用参数提取（最准确，LLM 已解析出正确文件名）
+        path_str = ""
+        for m in openai_messages:
+            if isinstance(m, dict) and m.get("role") == "assistant" and "tool_calls" in m:
+                for tc in m["tool_calls"]:
+                    try:
+                        if tc["function"]["name"] == "write_file":
+                            args = json.loads(tc["function"]["arguments"])
+                            if args.get("path"):
+                                path_str = args["path"]
+                                break
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+            if path_str:
+                break
+
+        # 方式 2: 回退到从用户消息猜测
+        if not path_str:
+            path_str = self._guess_filename(user_message, openai_messages)
+
+        if not path_str:
+            return None
+
+        p = Path(path_str).expanduser().resolve()
+        if not p.exists():
+            return {"path": str(p), "exists": False, "empty": True}
+        size = p.stat().st_size
+        return {"path": str(p), "exists": True, "empty": size == 0}
 
     def _error_result(self, ctx: AgentContext, error_msg: str) -> dict:
         """Return a structured error result."""

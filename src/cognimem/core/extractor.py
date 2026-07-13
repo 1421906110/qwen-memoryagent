@@ -122,6 +122,10 @@ class TripleExtractor:
                     agent_id=agent_id,
                     fact_type="observation",
                     source_session=source,
+                    evidence=[EvidenceItem(
+                        source=source or "unknown",
+                        statement=text[:300],
+                    )],
                 ))
 
         return facts

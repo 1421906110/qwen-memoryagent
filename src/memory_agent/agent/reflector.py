@@ -57,6 +57,14 @@ FIX_PATTERNS: list[tuple[str, str, str]] = [
     (r"429|rate limit|too many requests", "rate_limited",
      "请求太频繁被限流了。建议等几秒再重试。"),
 
+    # Write file specific
+    (r"缺少 path 参数|content_empty", "write_file_missing_args",
+     "write_file 缺少 path 参数或 content 为空。检查参数：path 用绝对路径，content 必须有非空内容。"),
+    (r"写入内容为空", "write_file_empty_content",
+     "write_file 的 content 参数是空字符串。需要把完整的文件内容放到 content 参数里再调用。"),
+    (r"Read-only file system|read.?only", "write_file_wrong_path",
+     "写入路径是只读文件系统。用户 Mac 路径是 /Users/baikai/Desktop/，不是 /root/Desktop/。"),
+
     # Generic
     (r"empty|no content|404", "not_found",
      "内容不存在或为空。检查 URL 或查询条件是否正确。"),
@@ -80,8 +88,8 @@ TOOL_FALLBACKS: dict[str, list[dict]] = {
     ],
     "write_file": [
         {"tool": "shell",
-         "reason": "文件写入失败，试试用 shell 的 echo/cat",
-         "args_hint": "用 mkdir -p 创建目录后重试"},
+         "reason": "write_file 工具调用失败，改用 shell 的 heredoc 写入",
+         "args_hint": "用 shell：cat <<'MAINEOF' > /Users/baikai/Desktop/文件名.html（写入完整内容）"},
     ],
     "read_file": [
         {"tool": "shell",
@@ -262,6 +270,11 @@ class FixExecutor:
                     shutil.copy2(p, backup)
                     logger.info("🔧 Auto-fix: backed up %s → %s", p.name, backup.name)
                     return {"fixed": True, "action": f"backup to {backup.name}"}
+
+        # ── 5. write_file empty content → no auto-fix (need LLM to provide content) ──
+        if category in ("write_file_empty_content", "write_file_missing_args"):
+            logger.info("🔧 Auto-fix 不可用: write_file 需要 LLM 提供正确参数")
+            return {"fixed": False, "action": "write_file_needs_llm_retry"}
 
         return {"fixed": False, "action": "no_auto_fix"}
 

@@ -193,13 +193,16 @@ class LLMClient:
                 self._extra_body["enable_search"] = True
                 logger.info("🔍 Qwen 内置搜索已开启")
 
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=30.0)
+        # ⭐ DeepSeek thinking 模式每次调用可长达 60s+
+        # timeout 太短 → 频繁超时重试 → event loop 阻塞 → 浏览器超时
+        _timeout = 120.0 if self._is_deepseek else 60.0
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=_timeout)
 
         # ── Independent embedding client ──
         _ek = os.getenv("EMBEDDING_API_KEY", "")
         _eb = os.getenv("EMBEDDING_BASE_URL", "")
         if _ek:
-            self._embed_client = OpenAI(api_key=_ek, base_url=_eb or self.base_url, timeout=30.0)
+            self._embed_client = OpenAI(api_key=_ek, base_url=_eb or self.base_url, timeout=_timeout)
             logger.info("📐 独立 embedding: %s", _eb or "主客户端")
         else:
             self._embed_client = self.client
@@ -342,8 +345,13 @@ class LLMClient:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice
 
+        # ⭐ 工具调用：超时不必重试（DeepSeek thinking 模式本来就慢）
+        # 只重试 429/5xx 这种服务器端错误
+        _max_retries = 1 if self._is_deepseek else 2
         return _api_call_with_retry(
-            lambda: self.client.chat.completions.create(**kwargs)
+            lambda: self.client.chat.completions.create(**kwargs),
+            max_retries=_max_retries,
+            base_delay=self._cfg.get("retry_base_other", 1.0),
         )
 
     def chat_stream(
