@@ -75,6 +75,49 @@ MAX_READ_LINE_LENGTH = 100_000  # 10万字符
 # 最大命令超时（秒）
 MAX_COMMAND_TIMEOUT = 120
 
+# 本地 Mac 路径模式（Agent 运行在服务器上，无法访问这些路径）
+LOCAL_MAC_PATH_PATTERNS = [
+    "/Users/",
+    "~/Desktop",
+    "~/Downloads",
+    "~/Documents",
+    "~/Movies",
+    "~/Music",
+    "~/Pictures",
+]
+
+
+def is_local_mac_path(path: str) -> tuple[bool, str]:
+    """
+    检测路径是否为本机 Mac 路径（服务器上不可访问）。
+
+    返回 (True, 匹配的模式) 如果是本地路径，
+    返回 (False, "") 如果是服务器路径。
+    """
+    expanded = os.path.expanduser(path)
+    for pattern in LOCAL_MAC_PATH_PATTERNS:
+        if pattern in expanded or pattern in path:
+            return True, pattern
+    return False, ""
+
+
+def build_local_path_hint(path: str) -> str:
+    """
+    构建友好的本地路径错误提示。
+    Agent 在服务器上运行，无法写入/复制到本机 Mac 路径。
+    """
+    is_local, pattern = is_local_mac_path(path)
+    if is_local:
+        return (
+            f"❌ 目标路径包含本机 Mac 路径模式「{pattern}」\n"
+            f"   Agent 运行在远程服务器上，无法直接写入/复制到本机路径。\n"
+            f"   ✅ 正确做法：\n"
+            f"      1. 文件先保存到服务器路径（如 /home/ecs-user/）\n"
+            f"      2. 然后本机执行 scp 拉取：\n"
+            f"         scp root@47.99.151.253:/服务器路径/文件名 ~/Desktop/\n"
+        )
+    return ""
+
 
 # ═══════════════════════════════════════════════════════════════
 # 验证函数
@@ -120,6 +163,11 @@ def validate_write_path(path: str | Path) -> tuple[bool, str]:
     if fname in (".env", ".env.local", ".git-credentials", ".netrc"):
         return False, f"拒绝写入敏感文件: {fname}"
 
+    # 检测本地 Mac 路径（Agent 在远程服务器上，无法写入本机路径）
+    hint = build_local_path_hint(p_str)
+    if hint:
+        return False, hint
+
     return True, ""
 
 
@@ -128,6 +176,7 @@ def validate_shell_command(command: str) -> tuple[bool, str]:
     验证 shell 命令是否安全。
     - 阻止危险命令
     - 阻止交互式命令
+    - 阻止 cp/mv 到本地 Mac 路径（服务器上不存在）
     - 限制超时
     """
     cmd_stripped = command.strip().lower()
@@ -155,6 +204,15 @@ def validate_shell_command(command: str) -> tuple[bool, str]:
     for dp in dangerous_pipes:
         if dp in cmd_stripped:
             return False, f"命令包含危险操作: {dp}"
+
+    # 检测 cp/mv/scp 目标路径是否为本机 Mac 路径
+    file_cmds = ["cp ", "mv ", "scp ", "rsync ", "cat > ", "cat >> "]
+    for fc in file_cmds:
+        if fc in cmd_stripped:
+            # 提取命令中的路径参数（简单启发式：找 /Users/ 或 ~/Desktop 等模式）
+            for pattern in LOCAL_MAC_PATH_PATTERNS:
+                if pattern.lower() in cmd_stripped:
+                    return False, build_local_path_hint(pattern)
 
     return True, ""
 
