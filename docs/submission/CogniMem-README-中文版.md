@@ -16,7 +16,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**在线演示：** [http://42.121.253.80:8000](http://42.121.253.80:8000)
+**在线演示：** [http://47.99.151.253:8000](http://47.99.151.253:8000)
 
 </div>
 

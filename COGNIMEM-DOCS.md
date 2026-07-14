@@ -3,7 +3,7 @@
 > **版本:** v0.13 | **更新:** 2026-07-12
 > **赛道:** Qwen Cloud MemoryAgent | **许可证:** MIT
 > **仓库:** [github.com/1421906110/qwen-memoryagent](https://github.com/1421906110/qwen-memoryagent)
-> **演示:** [http://42.121.253.80:8000](http://42.121.253.80:8000)
+> **演示:** [http://47.99.151.253:8000](http://47.99.151.253:8000)
 
 ---
 
@@ -841,7 +841,7 @@ mcp>=1.0             MCP 协议
 
 | 项 | 值 |
 |:--|:---|
-| 地址 | `42.121.253.80:8000` |
+| 地址 | `47.99.151.253:8000` |
 | 系统 | Ubuntu 22.04 LTS |
 | 用户 | `ecs-user` |
 | 项目路径 | `/home/ecs-user/qwen-memoryagent` |
@@ -877,13 +877,13 @@ cd /Users/baikai/projects/qwen-memoryagent
 rsync -avz --delete \
   --exclude '.git' --exclude '.venv' --exclude '__pycache__' \
   --exclude '.pytest_cache' --exclude '.env' --exclude '*.log' \
-  ./ ecs-user@42.121.253.80:/home/ecs-user/qwen-memoryagent/
+  ./ ecs-user@47.99.151.253:/home/ecs-user/qwen-memoryagent/
 
 # 2. 重启服务
-ssh ecs-user@42.121.253.80 "sudo systemctl restart cognimem.service"
+ssh ecs-user@47.99.151.253 "sudo systemctl restart cognimem.service"
 
 # 3. 验证
-curl http://42.121.253.80:8000/health
+curl http://47.99.151.253:8000/health
 ```
 
 ### 12.4 Docker 部署

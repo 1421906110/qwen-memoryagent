@@ -14,7 +14,7 @@ import urllib.error
 import os
 import sys
 
-TARGET = os.environ.get("PROXY_TARGET", "http://42.121.253.80:8000")
+TARGET = os.environ.get("PROXY_TARGET", "http://47.99.151.253:8000")
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):

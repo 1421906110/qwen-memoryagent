@@ -213,10 +213,10 @@ open http://localhost:9999
 ## 部署到阿里云
 
 已部署在阿里云 ECS（Ubuntu 22.04），systemd 开机自启，公网可访问：
-- **聊天界面:** http://42.121.253.80:8000/
-- **仪表盘:** http://42.121.253.80:8000/dashboard
-- **知识图谱:** http://42.121.253.80:8000/graph
-- **健康检测:** http://42.121.253.80:8000/health
+- **聊天界面:** http://47.99.151.253:8000/
+- **仪表盘:** http://47.99.151.253:8000/dashboard
+- **知识图谱:** http://47.99.151.253:8000/graph
+- **健康检测:** http://47.99.151.253:8000/health
 
 配置: 2 vCPU, 8GB RAM, PostgreSQL 14 + pgvector, Qwen3.7-Plus @ DashScope
 
@@ -226,4 +226,4 @@ open http://localhost:9999
 
 - Devpost: https://qwencloud-hackathon.devpost.com/
 - GitHub: https://github.com/1421906110/qwen-memoryagent
-- 在线演示: http://42.121.253.80:8000
+- 在线演示: http://47.99.151.253:8000

@@ -1,7 +1,7 @@
 # 🧪 CogniMem 具体测试方法手册
 
 > 版本：v0.10 | 日期：2026-07-10
-> 测试目标：http://42.121.253.80:8000（ECS 公网）
+> 测试目标：http://47.99.151.253:8000（ECS 公网）
 > 前置条件：服务已启动，端口可达
 
 ---
@@ -16,12 +16,12 @@
 
 ```bash
 # 存记忆
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","session_id":"t1","content":"用户喜欢喝冰美式","confidence":0.9}'
 
 # 查记忆看提取结果
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"冰美式","limit":5}'
 ```
@@ -51,7 +51,7 @@ curl -s -X POST http://42.121.253.80:8000/recall \
 ```bash
 # 1.2a 空查询（浏览全部）
 echo "=== 空查询 ==="
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"","limit":30}' | python3 -c "
 import sys,json
@@ -63,19 +63,19 @@ for m in d['memories'][:5]:
 
 # 1.2b 精确查询
 echo "=== 精确查询 ==="
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"冰美式","limit":10}'
 
 # 1.2c 语义查询（近义词）
 echo "=== 语义查询 ==="
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"程序员","limit":10}'
 
 # 1.2d 组合条件
 echo "=== 组合查询 ==="
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"张三 北京","limit":10}'
 ```
@@ -97,15 +97,15 @@ curl -s -X POST http://42.121.253.80:8000/recall \
 ```bash
 # 1.3a 真矛盾检测
 echo "=== 真矛盾 ==="
-curl -s -X DELETE "http://42.121.253.80:8000/clear?agent_id=test_con" > /dev/null
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X DELETE "http://47.99.151.253:8000/clear?agent_id=test_con" > /dev/null
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_con","content":"用户喜欢喝冰美式","confidence":0.9}' > /dev/null
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_con","content":"用户不喜欢喝冰美式","confidence":0.9}' > /dev/null
 sleep 2
-curl -s "http://42.121.253.80:8000/stats?agent_id=test_con" | python3 -c "
+curl -s "http://47.99.151.253:8000/stats?agent_id=test_con" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 c = d.get('contradictions',0)
 print(f'矛盾数: {c}')
@@ -115,29 +115,29 @@ else: print('❌ 未检出')
 
 # 1.3b 中性谓词不误报
 echo "=== 中性谓词 ==="
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_con","content":"用户请求读取文件","confidence":0.9}' > /dev/null
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_con","content":"用户请求搜索网络","confidence":0.9}' > /dev/null
 sleep 1
-curl -s "http://42.121.253.80:8000/stats?agent_id=test_con" | python3 -c "
+curl -s "http://47.99.151.253:8000/stats?agent_id=test_con" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 print(f'矛盾数（应保持原数）: {d.get(\"contradictions\")}')
 "
 
 # 1.3c 跨类别偏好不误报
 echo "=== 跨类别偏好 ==="
-curl -s -X DELETE "http://42.121.253.80:8000/clear?agent_id=test_pref" > /dev/null
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X DELETE "http://47.99.151.253:8000/clear?agent_id=test_pref" > /dev/null
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_pref","content":"用户喜欢喝咖啡","confidence":0.9}' > /dev/null
-curl -s -X POST http://42.121.253.80:8000/remember \
+curl -s -X POST http://47.99.151.253:8000/remember \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_pref","content":"用户喜欢吃火锅","confidence":0.9}' > /dev/null
 sleep 1
-curl -s "http://42.121.253.80:8000/stats?agent_id=test_pref" | python3 -c "
+curl -s "http://47.99.151.253:8000/stats?agent_id=test_pref" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 c = d.get('contradictions',0)
 if c == 0: print('✅ 跨类别不误报')
@@ -160,7 +160,7 @@ else: print(f'❌ 误报矛盾 {c}')
 
 ```bash
 # 获取一条已存事实的 ID
-FID=$(curl -s -X POST http://42.121.253.80:8000/recall \
+FID=$(curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_mem","query":"冰美式","limit":1}' | python3 -c "
 import sys,json; print(json.load(sys.stdin)['memories'][0]['id'])
@@ -169,7 +169,7 @@ echo "目标事实: $FID"
 
 # confirm
 echo -n "确认: "
-curl -s -X POST http://42.121.253.80:8000/confirm \
+curl -s -X POST http://47.99.151.253:8000/confirm \
   -H "Content-Type: application/json" \
   -d "{\"fact_id\":\"$FID\",\"agent_id\":\"test_mem\"}" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -178,7 +178,7 @@ print(f'status={d[\"status\"]}')
 
 # challenge
 echo -n "质疑: "
-curl -s -X POST http://42.121.253.80:8000/challenge \
+curl -s -X POST http://47.99.151.253:8000/challenge \
   -H "Content-Type: application/json" \
   -d "{\"fact_id\":\"$FID\",\"agent_id\":\"test_mem\"}" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -187,7 +187,7 @@ print(f'status={d[\"status\"]}')
 
 # 版本链
 echo -n "版本链: "
-curl -s "http://42.121.253.80:8000/versions/$FID" | python3 -c "
+curl -s "http://47.99.151.253:8000/versions/$FID" | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 print(f'{d[\"count\"]} 个版本')
 for v in d['versions']:
@@ -205,7 +205,7 @@ for v in d['versions']:
 
 ```bash
 echo "=== 简单对话 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c1","message":"你好"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -221,7 +221,7 @@ print('✅')
 
 ```bash
 echo "=== 搜索 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c2","message":"搜一下AI新闻"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -237,7 +237,7 @@ print('✅')
 
 ```bash
 echo "=== 早停 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c3","message":"搜一下Qwen2"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -253,7 +253,7 @@ print('✅')
 
 ```bash
 echo "=== 上下文分离 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "agent_id":"test_agt","session_id":"c4","message":"搜一下AI工具",
@@ -278,7 +278,7 @@ else: print(f'⚠️ {r[:50]}')
 ```bash
 echo "=== 多步任务 ==="
 echo '多步测试内容' > /tmp/agent_multi_test.txt
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c5","message":"先读 /tmp/agent_multi_test.txt 的内容，再搜一下相关内容"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -295,7 +295,7 @@ print('✅')
 ```bash
 echo "=== 文件读 ==="
 echo 'Hello CogniMem' > /tmp/agent_file_test.txt
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c6","message":"读取 /tmp/agent_file_test.txt"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -305,7 +305,7 @@ print(f'✅ tools={d[\"tools_called\"]}')
 "
 
 echo "=== 文件不存在 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c7","message":"读取 /nonexistent/file.txt"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -327,7 +327,7 @@ cat > /tmp/agent_analyze.txt << 'EOF'
 方法：使用大模型
 预期：会有很多用户
 EOF
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"c8","message":"分析 /tmp/agent_analyze.txt 的质量"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -345,13 +345,13 @@ print('✅' if found else '⚠️ 无批评词')
 ```bash
 echo "=== 跨对话记忆 ==="
 # 第一轮：存偏好
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"mem1","message":"我喜欢蓝色"}' > /dev/null
 sleep 1
 
 # 第二轮：问偏好
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"mem2","message":"你记得我喜欢什么颜色吗？"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -369,7 +369,7 @@ echo "=== 路由测试 ==="
 
 # streaming 端点测试（含搜→agent路径）
 echo "含搜→agent:"
-curl -s -X POST http://42.121.253.80:8000/chat/stream \
+curl -s -X POST http://47.99.151.253:8000/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"r1","message":"搜点什么"}' | grep '"type": "meta"\|"type": "done"'
 
@@ -377,7 +377,7 @@ echo ""
 
 # streaming 端点测试（无词→streaming路径）
 echo "无词→stream:"
-curl -s -X POST http://42.121.253.80:8000/chat/stream \
+curl -s -X POST http://47.99.151.253:8000/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_agt","session_id":"r2","message":"今天天气真不错"}' | grep '"type": "meta"\|"type": "done"'
 ```
@@ -395,9 +395,9 @@ curl -s -X POST http://42.121.253.80:8000/chat/stream \
 echo "=== 三页面加载 ==="
 ALL=0
 for p in "/" "/dashboard" "/graph"; do
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' http://42.121.253.80:8000$p)
-  CT=$(curl -s -o /dev/null -w '%{content_type}' http://42.121.253.80:8000$p)
-  HTML=$(curl -s http://42.121.253.80:8000$p | grep -c '<html\|<!DOCTYPE')
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' http://47.99.151.253:8000$p)
+  CT=$(curl -s -o /dev/null -w '%{content_type}' http://47.99.151.253:8000$p)
+  HTML=$(curl -s http://47.99.151.253:8000$p | grep -c '<html\|<!DOCTYPE')
   echo "$p → HTTP $CODE | $CT | HTML: $([ $HTML -gt 0 ] && echo '✅' || echo '❌')"
   [ "$CODE" = "200" ] && [ $HTML -gt 0 ] && ALL=$((ALL+1))
 done
@@ -408,7 +408,7 @@ echo "通过: $ALL/3"
 
 ```bash
 echo "=== 仪表盘组件 ==="
-HTML=$(curl -s http://42.121.253.80:8000/dashboard)
+HTML=$(curl -s http://47.99.151.253:8000/dashboard)
 echo -n "总记忆: "; echo "$HTML" | grep -c '总记忆'
 echo -n "抽象概念: "; echo "$HTML" | grep -c '抽象概念'
 echo -n "偏好: "; echo "$HTML" | grep -c '偏好'
@@ -424,7 +424,7 @@ echo -n "活动日志: "; echo "$HTML" | grep -c '活动日志'
 
 ```bash
 echo "=== SSE 流式 ==="
-RESP=$(curl -s -X POST http://42.121.253.80:8000/chat/stream \
+RESP=$(curl -s -X POST http://47.99.151.253:8000/chat/stream \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test","session_id":"st1","message":"你好"}')
 TOKENS=$(echo "$RESP" | grep -c '"type": "token"')
@@ -442,7 +442,7 @@ echo "tokens=$TOKENS meta=$META done=$DONE"
 
 ```bash
 echo "=== 健康检测 ==="
-curl -s http://42.121.253.80:8000/health | python3 -c "
+curl -s http://47.99.151.253:8000/health | python3 -c "
 import sys,json; h=json.load(sys.stdin)
 print(f'健康分: {h[\"score\"]}')
 print(f'db:    {h[\"checks\"].get(\"db\")}')
@@ -458,13 +458,13 @@ print(f'工具:   {h[\"checks\"].get(\"tools\")} 个')
 ```bash
 echo "=== 噪音过滤 ==="
 # curl 命令
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_noise","session_id":"n1","message":"curl https://example.com"}' > /dev/null
 sleep 1
 
 echo -n "curl过滤: "
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_noise","query":"curl"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -473,13 +473,13 @@ print('❌ 有噪音' if has else '✅ 已过滤')
 "
 
 # 个人信息正常存储
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_noise","session_id":"n2","message":"我叫test_user，喜欢跑步"}' > /dev/null
 sleep 1
 
 echo -n "个人信息: "
-curl -s -X POST http://42.121.253.80:8000/recall \
+curl -s -X POST http://47.99.151.253:8000/recall \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test_noise","query":"test_user"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -492,13 +492,13 @@ print('✅ 正常存' if found else '⚠️ 可能丢失')
 
 ```bash
 echo "=== 并发请求 ==="
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test","session_id":"p1","message":"你好"}' > /dev/null &
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test","session_id":"p2","message":"搜一下AI"}' > /dev/null &
-curl -s http://42.121.253.80:8000/stats?agent_id=test > /dev/null &
+curl -s http://47.99.151.253:8000/stats?agent_id=test > /dev/null &
 wait
 echo "✅ 3 个并发请求均完成"
 ```
@@ -509,7 +509,7 @@ echo "✅ 3 个并发请求均完成"
 echo "=== 参数校验 ==="
 # 空消息
 echo -n "空消息: "
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"agent_id":"test","message":"","session_id":"e1"}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -518,7 +518,7 @@ print(f'422 ✅' if 'detail' in d else '❌')
 
 # 无效 JSON
 echo -n "无效JSON: "
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H 'Content-Type: application/json' \
   -d 'not json' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -527,7 +527,7 @@ print(f'422 ✅' if 'detail' in d else '❌')
 
 # 缺字段
 echo -n "缺字段: "
-curl -s -X POST http://42.121.253.80:8000/chat \
+curl -s -X POST http://47.99.151.253:8000/chat \
   -H "Content-Type: application/json" \
   -d '{}' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
@@ -540,7 +540,7 @@ print(f'422 ✅' if 'detail' in d else '❌')
 
 ```bash
 echo "=== Consolidation ==="
-curl -s -X POST 'http://42.121.253.80:8000/consolidate?agent_id=default' | python3 -c "
+curl -s -X POST 'http://47.99.151.253:8000/consolidate?agent_id=default' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 r=d.get('result',{})
 print(f'merged={r.get(\"merged\",0)} abstracted={r.get(\"abstracted\",0)} resolved={r.get(\"contradictions_resolved\",0)}')
@@ -553,7 +553,7 @@ print('✅' if d.get('status')=='success' or r else '⚠️')
 
 ```bash
 echo "=== 清理 ==="
-curl -s -X DELETE 'http://42.121.253.80:8000/clear?agent_id=test_mem' | python3 -c "
+curl -s -X DELETE 'http://47.99.151.253:8000/clear?agent_id=test_mem' | python3 -c "
 import sys,json; d=json.load(sys.stdin)
 print(f'{d[\"message\"]}')
 "
@@ -590,4 +590,4 @@ print(f'{d[\"message\"]}')
 ```
 
 > 每条命令都是可直接复制到终端执行的具体测试步骤。
-> 测试前确保先执行 `export URL=http://42.121.253.80:8000`
+> 测试前确保先执行 `export URL=http://47.99.151.253:8000`
