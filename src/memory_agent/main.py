@@ -250,6 +250,13 @@ async def lifespan(_app: FastAPI):
                                 _startup_checks.append("✅ pgvector 扩展已安装")
                             else:
                                 _startup_checks.append("⚠️ pgvector 未安装（向量搜索降级为纯文本）")
+                                # ⭐ 纯 Python 向量搜索回填
+                                try:
+                                    n = _db.backfill_embeddings()
+                                    if n > 0:
+                                        _startup_checks.append(f"✅ 回填 {n} 条 embedding")
+                                except Exception:
+                                    pass
                         except Exception:
                             _startup_checks.append("⚠️ pgvector 检查失败")
                     else:

@@ -689,37 +689,87 @@ class DatabaseAdapter:
         return vec
 
     def update_embedding(self, fact_id: str, text: str):
-        """计算并存储 embedding"""
+        """计算 embedding 并存储为 JSON 文本（无需 pgvector 扩展）"""
+        import json as _json
+        vec = self.compute_embedding(text)
+        vec_json = _json.dumps(vec)
         with self._plain_cursor_ctx() as cur:
             cur.execute(
                 "UPDATE facts SET embedding = %s WHERE fact_id = %s",
-                (self.compute_embedding(text), fact_id)
+                (vec_json, fact_id)
             )
 
     def search_facts_vector(self, agent_id: str, query: str,
                             limit: int = 10) -> list[FactTriple]:
-        """向量相似度搜索
+        """纯 Python 向量相似度搜索（无需 pgvector 扩展）
 
-        纯 Python 增强型哈希 embedding v2.0（无外部模型依赖）。
-        新算法使用多粒度 n-gram + 位置加权 + 多哈希分布，
-        语义区分度显著提升（相关对 0.24+，无关对 <0.15）。
-        阈值设为 0.15 以平衡精度和召回。
+        1. 读取所有已有 embedding 的事实
+        2. 用纯 Python 计算 query embedding
+        3. Python 余弦相似度排序
+        4. 返回 top_k
         """
-        vec = self.compute_embedding(query)
+        import json as _json
+        import math as _math
+
+        query_vec = self.compute_embedding(query)
+
         try:
             with self._cursor_ctx() as cur:
-                cur.execute("""
-                    SELECT *, 1 - (embedding <=> %s::vector) AS similarity
-                    FROM facts
-                    WHERE agent_id = %s AND embedding IS NOT NULL
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                """, (vec, agent_id, vec, limit))
-                return [
-                    self._dict_to_fact(dict(r))
-                    for r in cur.fetchall()
-                    if r.get("similarity", 0) > 0.15
-                ]
+                cur.execute(
+                    "SELECT * FROM facts WHERE agent_id = %s AND embedding IS NOT NULL",
+                    (agent_id,)
+                )
+                rows = cur.fetchall()
         except Exception as e:
-            logger.error("[L3] vector search failed: %s", e)
+            logger.error("[L3] query failed: %s", e)
             return []
+
+        if not rows:
+            return []
+
+        def _cosine_sim(a: list[float], b: list[float]) -> float:
+            """纯 Python 余弦相似度"""
+            dot = sum(ax * bx for ax, bx in zip(a, b))
+            na = _math.sqrt(sum(ax * ax for ax in a))
+            nb = _math.sqrt(sum(bx * bx for bx in b))
+            if na == 0 or nb == 0:
+                return 0.0
+            return dot / (na * nb)
+
+        scored = []
+        for r in rows:
+            try:
+                embed = _json.loads(r.get("embedding", "[]") or "[]")
+                if not embed:
+                    continue
+                sim = _cosine_sim(query_vec, embed)
+                if sim > 0.15:  # 阈值
+                    fact = self._dict_to_fact(dict(r))
+                    scored.append((sim, fact))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [f for _, f in scored[:limit]]
+
+    def backfill_embeddings(self):
+        """为所有 embedding 为 NULL 的事实重新计算并存储 embedding"""
+        import json as _json
+        logger.info("[L3] 开始回填 embedding...")
+        try:
+            with self._cursor_ctx() as cur:
+                cur.execute(
+                    "SELECT fact_id, subject, predicate, object, object FROM facts WHERE embedding IS NULL"
+                )
+                rows = cur.fetchall()
+            count = 0
+            for r in rows:
+                text = f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')}"
+                self.update_embedding(r['fact_id'], text)
+                count += 1
+            if count:
+                logger.info("[L3] 已回填 %d 条 embedding", count)
+            return count
+        except Exception as e:
+            logger.error("[L3] 回填 embedding 失败: %s", e)
+            return 0
