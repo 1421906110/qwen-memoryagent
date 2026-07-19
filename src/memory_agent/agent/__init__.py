@@ -854,6 +854,18 @@ class Agent:
                                        f"下一步：【{next_step.description}】。",
                         })
                         continue
+                    # ⭐ v0.16: 完成标记驱动退出（有 plan 时也要支持）
+                    if self._is_complete_response(text):
+                        final_reply = self._strip_completion_marker(text)
+                        logger.info("✅ Task complete via marker (with plan)")
+                        break
+
+                    # ⭐ 以上条件都不匹配时的兜底：
+                    # LLM 回复被静默丢弃 → 死循环直到 max_iterations（这是根因！）
+                    # 至少把文本追加到对话历史，让 LLM 能推进
+                    if text.strip():
+                        openai_messages.append({"role": "assistant", "content": text})
+                    self._inject_completion_reminder(openai_messages, iteration)
                 else:
                     # 无计划 → 用完成标记判断退出
                     if not llm_has_acted:
