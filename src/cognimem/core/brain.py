@@ -14,10 +14,10 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any
-from .models import FactTriple, EvidenceItem
+from .models import FactTriple, EvidenceItem, Contradiction
 from .extractor import TripleExtractor
 from .llm_extractor import LLMTripleExtractor
-from .fact_network import FactNetwork
+from .fact_network import FactNetwork, _NEUTRAL_PREDICATES
 from .recall import RecallRouter
 
 logger = logging.getLogger(__name__)
@@ -484,17 +484,64 @@ class CogniMem:
             return {"deleted": 0, "message": str(e)}
 
     def consolidate(self, agent_id: str = "default") -> dict:
-        """触发睡眠期记忆整合（含抽象化）"""
+        """触发睡眠期记忆整合（含抽象化 + 矛盾定期扫描）"""
         result = self.fact_network.consolidate(agent_id,
                                                llm_extractor=self.llm_extractor)
+
+        # ★ 矛盾定期扫描：检查非动作、非中性事实间的矛盾
+        try:
+            contradictions_found = self._scan_contradictions(agent_id)
+            if contradictions_found:
+                result["contradictions"] = contradictions_found
+        except Exception as e:
+            logger.warning("矛盾扫描失败: %s", e)
+
         # ★ 审计日志
         db = getattr(self.fact_network, 'db', None)
         if db and hasattr(db, 'log_audit'):
             detail = (f"维护完成: 遗忘{result.get('deleted',0)}条 "
                      f"衰减{result.get('decayed',0)}条 "
-                     f"抽象{result.get('abstracted',0)}条")
+                     f"抽象{result.get('abstracted',0)}条"
+                     f"矛盾{result.get('contradictions',0)}条")
             db.log_audit(agent_id, "consolidation", detail, caller="brain.consolidate")
         return result
+
+    def _scan_contradictions(self, agent_id: str) -> int:
+        """主动扫描所有非动作事实间的矛盾"""
+        import uuid
+        facts = self.fact_network.get_all_facts(agent_id)
+        candidates = [f for f in facts
+                      if f.fact_type not in ("action", "credential")
+                      and f.predicate not in _NEUTRAL_PREDICATES]
+        found = 0
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                a, b = candidates[i], candidates[j]
+                if a.subject != b.subject or a.object != b.object:
+                    continue
+
+                def _is_neg(p):
+                    return p.startswith(("不", "没", "未")) or p in {"讨厌", "反感", "拒绝"}
+                def _is_pos(p):
+                    return p in {"喜欢", "爱", "要", "想", "是", "有", "需要", "能", "可以"}
+
+                if _is_neg(a.predicate) and _is_pos(b.predicate):
+                    c = Contradiction(fact_a_id=a.fact_id, fact_b_id=b.fact_id,
+                                      agent_id=agent_id, contradiction_type="deny",
+                                      description=f"'{a.subject}' '{a.predicate}' '{a.object}' "
+                                                  f"矛盾于 '{b.predicate}'")
+                    self.fact_network.db.save_contradiction(c)
+                    found += 1
+                elif _is_pos(a.predicate) and _is_neg(b.predicate):
+                    c = Contradiction(fact_a_id=b.fact_id, fact_b_id=a.fact_id,
+                                      agent_id=agent_id, contradiction_type="deny",
+                                      description=f"'{b.subject}' '{b.predicate}' '{b.object}' "
+                                                  f"矛盾于 '{a.predicate}'")
+                    self.fact_network.db.save_contradiction(c)
+                    found += 1
+        if found:
+            logger.info("🔍 矛盾扫描: 发现 %d 条新矛盾", found)
+        return found
 
     # ═══════════════════════════════════════════════════════════════
     # ★ P1-3: 知识库模块（MIRIX Knowledge Vault 启发）
