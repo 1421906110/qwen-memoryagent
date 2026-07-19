@@ -637,7 +637,9 @@ def tool_web_search(tool_call_id: str, args: dict,
                 if _news_content:
                     _combined = "\n\n".join(_news_content)
                     logger.info("📰 新闻专用提取: %d 来源, %d chars", len(_news_content), len(_combined))
-                    # 也拼上 Bing 结果作为补充
+                    # 内容太少时不提前返回，继续走 Baidu/Bing 搜索
+                    if len(_combined) > 500:
+                        # 也拼上 Bing 结果作为补充
                     try:
                         _resp2 = client.get(
                             f"https://www.bing.com/search?q={encoded}&setlang=zh-CN",

@@ -375,8 +375,8 @@ class LLMClient:
 
         extra = dict(self._extra_body)
 
-        # 场景感知搜索（仅 Qwen）
-        if self._is_qwen and (enable_search is None or enable_search is True):
+        # 场景感知搜索：Qwen + DeepSeek 都支持 enable_search
+        if enable_search is None or enable_search is True:
             combined_text = " ".join(m.get("content", "") for m in full_messages if m.get("content"))
             if any(kw in combined_text for kw in ["搜", "查", "最新", "今天", "天气", "新闻",
                                                       "咨询", "了解", "介绍", "行情", "股价",

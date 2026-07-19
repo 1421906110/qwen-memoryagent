@@ -796,31 +796,22 @@ async def chat_stream(req: ChatRequest):
         # ── 判断简单问答还是复杂任务 ──
         msg = req.message.strip()
         ACTION_WORDS = [
-            "搜索", "搜一下", "查找", "查一下", "查一查", "先查", "查", "爬", "下载", "读取",
-            "写入", "编辑", "分析", "对比", "创建", "写", "生成",
-            "改", "删", "跑", "试", "调用", "执行", "运行",
-            "总结", "翻译", "推荐", "画", "整理", "记住", "计算",
-            "干", "搞", "弄", "做",
-            "search", "find", "fetch", "read", "write",
-            "edit", "create", "analyze", "install",
+            "爬", "下载", "读取",
+            "写入", "编辑", "创建", "写", "生成",
+            "改", "删", "跑", "试", "调用", "执行", "运行", "安装",
+            "分析", "对比",
         ]
         # ⭐ 继续/下一步 → 必须进 Agent 路径（否则不能调工具继续写文件等操作）
         IS_CONTINUATION = (
             msg in ("继续", "继续！", "继续执行") or msg.startswith("继续")
             or msg in ("next", "continue", "go on", "下一步", "然后呢")
         )
-        # ⭐ 实时性关键词 → 必须进 Agent 路径（否则 LLM 会瞎编新闻/股价/天气等）
-        # 注意：只放明显需要实时搜索的词，"今天""现在"太常见在闲聊中出现，不放
-        REALTIME_KEYWORDS = [
-            "新闻", "天气", "股价", "行情", "汇率", "最新",
-            "热点", "实时",
-            "news", "weather", "stock", "price", "latest",
-            "hot", "trending",
-        ]
         has_action = any(v in msg.lower() for v in ACTION_WORDS)
-        needs_realtime = any(kw in msg for kw in REALTIME_KEYWORDS)
-        # 简单问答 = 没有动作关键词 + 非继续 + 非实时 + 非长文本
-        is_simple = (len(msg) < 60) and not has_action and not IS_CONTINUATION and not needs_realtime
+        # 简单问答 = 没有文件/执行动作关键词 + 非继续 + 非长文本
+        # 注意：查/搜索/新闻类关键词不再强制走 agent 路径。
+        # 简单路径已开启 DeepSeek enable_search，让模型自己搜索，
+        # 效果远好于 agent 循环里的复杂 tool chain。
+        is_simple = (len(msg) < 60) and not has_action and not IS_CONTINUATION
 
         try:
             if is_simple:
