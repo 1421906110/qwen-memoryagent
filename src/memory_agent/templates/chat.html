@@ -1178,6 +1178,7 @@ function refreshTriples() {
       return;
     }
     list.innerHTML = mems.map(m => {
+      // 规范化显示：从 content 中解析 subject/predicate/object
       const parts = (m.content || '').split(' ');
       const subj = parts[0] || '';
       const pred = parts[1] || '';
@@ -1186,13 +1187,29 @@ function refreshTriples() {
       const confPct = Math.round(conf * 100);
       const confColor = conf >= 0.7 ? '#22c55e' : conf >= 0.4 ? '#f59e0b' : '#ef4444';
       const type = m.fact_type || m.memory_type || 'observation';
+
+      // 类型图标和显示名
+      const typeConfig = {
+        'preference': { icon: '❤️', label: '偏好', sort: 1 },
+        'fact':       { icon: '📋', label: '事实', sort: 2 },
+        'action':     { icon: '⚡', label: '动作', sort: 3 },
+        'goal':       { icon: '🎯', label: '目标', sort: 4 },
+        'decision':   { icon: '📌', label: '决定', sort: 5 },
+        'observation':{ icon: '👀', label: '观察', sort: 6 },
+        'abstraction':{ icon: '🔗', label: '抽象', sort: 7 },
+        'entity':     { icon: '🏷️', label: '实体', sort: 8 },
+      };
+      const tc = typeConfig[type] || { icon: '📄', label: type, sort: 9 };
+
       var fid = m.id;
       return '<div class="triple-item" onclick="showFactDetail(\'' + fid + '\')" style="cursor:pointer">' +
+        '<div style="display:flex;align-items:baseline;gap:4px;flex-wrap:wrap">' +
+        '<span class="type-badge" style="font-size:11px">' + tc.icon + ' ' + tc.label + '</span>' +
         '<span class="triple-subj">' + esc(subj) + '</span>' +
-        '<span class="triple-pred"> ' + esc(pred) + ' </span>' +
-        '<span class="triple-obj">' + esc(obj) + '</span>' +
+        '<span class="triple-pred" style="color:#999;font-size:12px">' + esc(pred) + '</span>' +
+        '<span class="triple-obj" style="font-size:13px">' + esc(obj) + '</span>' +
+        '</div>' +
         '<div class="triple-meta">' +
-        '<span class="type-badge">' + esc(type) + '</span>' +
         '<div class="conf-bar"><div class="fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>' +
         '<span class="conf-text">' + confPct + '%</span>' +
         '</div></div>';

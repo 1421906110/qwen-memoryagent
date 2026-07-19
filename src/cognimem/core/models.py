@@ -66,8 +66,13 @@ class FactTriple:
         if self.encoding_level not in valid_levels:
             self.encoding_level = "raw"
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+    def to_dict(self, max_object: int = 19) -> dict:
+        """转为字典，object 字段截断到 max_object 字（≤19 一行显示）"""
+        d = asdict(self)
+        obj = d.get("object", "")
+        if len(obj) > max_object:
+            d["object"] = obj[:max_object-1] + "…"
+        return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False)

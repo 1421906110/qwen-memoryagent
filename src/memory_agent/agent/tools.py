@@ -20,6 +20,7 @@ import logging
 import os
 import subprocess
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -285,65 +286,358 @@ def tool_web_fetch(tool_call_id: str, args: dict,
         return result
 
 
+def _parse_bing_results(html: str) -> list[str]:
+    """从 Bing HTML 中提取搜索结果标题+摘要+URL"""
+    import re as _re
+    texts = []
+
+    # 主结果：b_algo 块（标准搜索结果）
+    for block in _re.findall(r'<li[^>]*class="b_algo[^"]*"[^>]*>(.*?)</li>',
+                              html, _re.DOTALL):
+        # 先去掉 <link> CSS 标签（Bing 页面在 b_algo 里插了多个 link）
+        block = _re.sub(r'<link[^>]*>', '', block)
+
+        # 标题 + URL（只找 <a>，跳过 <link>）
+        title = ""
+        url = ""
+        a_m = _re.search(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', block)
+        if a_m:
+            url = a_m.group(1)
+            title = _re.sub(r'<[^>]+>', '', a_m.group(2)).strip()
+        if not title:
+            title_m = _re.search(r'<a[^>]*>(.*?)</a>', block)
+            if title_m:
+                title = _re.sub(r'<[^>]+>', '', title_m.group(1)).strip()
+
+        # 摘要（优先 b_caption > b_lineclamp2 > 普通 p）
+        body = ""
+        for pat in [
+            r'class="b_caption"[^>]*>.*?<p[^>]*class="b_lineclamp2"[^>]*>(.*?)</p>',
+            r'class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>',
+            r'<p[^>]*>(.*?)</p>',
+        ]:
+            body_m = _re.search(pat, block, _re.DOTALL)
+            if body_m:
+                body = _re.sub(r'<[^>]+>', '', body_m.group(1)).strip()
+                if len(body) > 10:
+                    break
+
+        if title and len(title) > 2:
+            if body:
+                texts.append(f"【{title}】{body} ——{url}" if url else f"【{title}】{body}")
+            else:
+                texts.append(f"【{title}】 ——{url}" if url else f"【{title}】")
+
+    # 兜底：如果 b_algo 没抓到，用旧方式
+    if not texts:
+        for m in _re.findall(r'<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', html):
+            clean = _re.sub(r'<[^>]+>', '', m).strip()
+            if clean and len(clean) > 10:
+                texts.append(clean)
+        for m in _re.findall(r'<h2>.*?<a[^>]*>(.*?)</a>', html):
+            clean = _re.sub(r'<[^>]+>', '', m).strip()
+            if clean:
+                texts.append(clean)
+
+    return texts[:10]
+
+
+def _extract_urls(texts: list[str]) -> list[str]:
+    """从搜索结果文本中提取 URL 链接"""
+    import re
+    urls = []
+    for line in texts:
+        # 匹配 ——URL 后缀（Bing 结果格式: 【标题】摘要 ——https://...）
+        m = re.search(r'——(https?://[^\s）)\]]+)', line)
+        if m:
+            url = m.group(1).rstrip(')').rstrip('）')
+            if url not in urls:
+                urls.append(url)
+    return urls
+
+
+def _auto_fetch_first_url(urls: list[str], timeout: int = 12) -> str:
+    """尝试抓取最相关的结果页面内容（优先 gov/彩票类站点）"""
+    import httpx
+    blocked_hosts = [
+        "127.0.0.1", "localhost", "0.0.0.0", "::1",
+        "10.", "172.16.", "172.17.", "192.168.",
+    ]
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    # 优先关键词（这类URL先抓）
+    priority_keywords = [
+        "cwl.gov.cn", "zhcw.com", "cjcp.cn", "lottery",
+        "开奖", "ssq", "双色球", "福彩",
+    ]
+    # 跳过关键词（字典页/百科不抓）
+    skip_keywords = [
+        "baike.baidu", "hanyu", "zidian", "gushici",
+        "shufazidian", "chagushici", "hgcha", "ufanv",
+        "shidianguji", "newdu", "ced.",
+    ]
+
+    # 先按优先级排序
+    def priority(url: str) -> int:
+        url_lower = url.lower()
+        for i, kw in enumerate(priority_keywords):
+            if kw in url_lower:
+                return i  # 越小越优先
+        return 999
+
+    sorted_urls = sorted(urls, key=priority)
+
+    for url in sorted_urls[:3]:  # 最多试3个
+        url_lower = url.lower()
+        # 跳过黑名单
+        blocked = any(host.startswith(url_lower.split('/')[2].split(':')[0])
+                      if '//' in url else False
+                      for host in blocked_hosts)
+        if blocked:
+            continue
+        # 跳过字典页
+        if any(sk in url_lower for sk in skip_keywords):
+            continue
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+                resp = client.get(url, headers=headers)
+            if resp.status_code == 200:
+                import re
+                text = resp.text
+                text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL)
+                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+                text = re.sub(r'<[^>]+>', ' ', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                if len(text) > 8000:
+                    text = text[:8000] + "\n...(已截断)"
+                if len(text) > 200:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
+_LOTTERY_API_URL = (
+    "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/"
+    "findDrawNotice?name=ssq&issueCount=20"
+)
+_SAVE_DIR = Path("/home/ecs-user/search_results")
+
+def _get_save_dir() -> Path:
+    """获取保存目录（ECS 用 /home/ecs-user, 本地用 /tmp）"""
+    d = _SAVE_DIR
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except (OSError, PermissionError):
+        # 本地 Mac 没有 /home/ecs-user，用 /tmp
+        tmp = Path("/tmp/cognimem_search")
+        tmp.mkdir(parents=True, exist_ok=True)
+        return tmp
+
+
+def _save_result(query: str, content: str, source: str) -> dict:
+    """保存搜索结果到服务器文件，返回文件信息"""
+    try:
+        save_dir = _get_save_dir()
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = "".join(c if c.isalnum() or c in '_' else '_' for c in query[:20])
+        fname = f"{ts}_{safe_name}.txt"
+        fpath = save_dir / fname
+        fpath.write_text(content, encoding="utf-8")
+        logger.info("💾 搜索结果已保存: %s (%d bytes)", fpath, len(content))
+        return {
+            "file_path": str(fpath),
+            "file_name": fname,
+            "file_size": len(content),
+            "scp_command": f"scp root@47.99.151.253:{fpath} ~/Desktop/",
+        }
+    except Exception as e:
+        logger.warning("保存搜索结果失败: %s", e)
+        return {}
+
+
+def _try_lottery_api(query: str) -> dict | None:
+    """尝试从官方 API 直接获取彩票数据
+
+    支持：双色球（ssq）— 中国福彩官网 JSON API
+    返回：标准格式的搜索结果字典，或 None
+    """
+    if "双色球" not in query and "ssq" not in query.lower() and "福彩" not in query:
+        return None
+
+    try:
+        import httpx
+        headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "zh-CN"}
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            resp = client.get(_LOTTERY_API_URL, headers=headers)
+
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        if data.get("state") != 0:
+            return None
+
+        results = data.get("result", [])
+        if not results:
+            return None
+
+        # 格式化开奖数据
+        lines = []
+        for draw in results[:20]:
+            code = draw.get("code", "")
+            date = draw.get("date", "")
+            red = draw.get("red", "")
+            blue = draw.get("blue", "")
+            lines.append(f"第{code}期（{date}）")
+            lines.append(f"  红球: {red}")
+            lines.append(f"  蓝球: {blue}")
+            lines.append("")
+
+        result_text = "\n".join(lines)
+        logger.info("🎯 彩票 API 直连成功: %d 期数据", len(results))
+
+        # 自动保存到服务器文件
+        save_info = _save_result(query, result_text, "lottery_api")
+
+        return {
+            "result": result_text,
+            "source": "lottery_api",
+            "query": query,
+            "_data_source": "cwl.gov.cn 中国福彩官网",
+            "_saved": save_info,
+        }
+    except Exception as e:
+        logger.info("彩票 API 不可用: %s", e)
+        return None
+
+
 def tool_web_search(tool_call_id: str, args: dict,
                     ctx: "AgentContext") -> dict:
     """Search the web.
 
-    Uses Qwen's built-in search (enable_search=true) via LLM client.
-    Falls back to Bing scraping if SEARCH_PROXY is set.
+    搜索策略（按优先级）：
+      0. 官方 API 直连（双色球等彩票数据从 cwl.gov.cn JSON API 直接获取）
+      1. Bing 直搜（httpx 直连，无需代理，国内可用）+ 自动抓取首个结果页面内容
+      2. Qwen DashScope 内置搜索 (enable_search，仅当真正用 Qwen 时)
+      3. Bing 代理搜索（SEARCH_PROXY 兜底）
     """
     query = args["query"]
+    import urllib.parse
+    _is_deepseek = "deepseek" in os.environ.get("QWEN_BASE_URL", "").lower()
 
-    # 方式 1：用 Qwen 内置搜索（走 DashScope API，国内可用，无需代理）
+    # ===================================================================
+    #  方式 0：官方 API 直连（特定数据源）
+    #  双色球 → cwl.gov.cn JSON API（中国福彩官网）
+    # ===================================================================
+    _lottery_api_result = _try_lottery_api(query)
+    if _lottery_api_result:
+        return _lottery_api_result
+
+    # ⭐ Bing 中文搜索优化：双色球搜索被拆成单字「双」
+    _enhanced_query = query
+    if "双色球" in query and "开奖" not in query and "号码" not in query:
+        _enhanced_query = query + " 开奖结果"
+    encoded = urllib.parse.quote(_enhanced_query)
+
+    # ===================================================================
+    #  方式 1：Bing 直搜 + 自动抓取首个结果页面
+    # ===================================================================
     try:
-        from memory_agent.services.llm_client import LLMClient
-        from openai import OpenAI
-        import os
-
-        # 直接用 OpenAI 客户端调 Qwen，走 enable_search，设长超时
-        api_key = os.getenv("QWEN_API_KEY", "")
-        base_url = os.getenv("QWEN_BASE_URL", "")
-        model = os.getenv("QWEN_MODEL", "qwen3.7-plus")
-        if api_key and base_url:
-            client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": f"请搜索：{query}，用中文总结搜索结果，列出具体信息"}],
-                temperature=0.3,
-                extra_body={"enable_search": True},
+        import httpx
+        bing_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0"
+            ),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+        }
+        with httpx.Client(timeout=15, follow_redirects=True) as client:
+            resp = client.get(
+                f"https://www.bing.com/search?q={encoded}&setlang=zh-CN",
+                headers=bing_headers,
             )
-            reply = resp.choices[0].message.content or ""
-            if reply and len(reply) > 20:
-                return {"result": reply, "source": "qwen_search", "query": query}
-    except Exception as e:
-        logger.info("Qwen 内置搜索不可用: %s", e)
+        if resp.status_code == 200:
+            texts = _parse_bing_results(resp.text)
+            if texts:
+                result_text = "\n".join(texts)
 
-    # 方式 2：Bing 直搜（需代理）
+                # ⭐ 自动抓取：从结果中提取 URL，抓取第一个可用页面
+                urls = _extract_urls(texts)
+                fetched = ""
+                if urls:
+                    fetched = _auto_fetch_first_url(urls)
+                    if fetched:
+                        logger.info(
+                            "📄 自动抓取首个结果页: %s (%d chars)",
+                            urls[0][:60], len(fetched),
+                        )
+
+                return {
+                    "result": result_text,
+                    "source": "bing",
+                    "query": query,
+                    "fetched_page": fetched or None,
+                    "fetched_url": urls[0] if fetched else None,
+                    "_saved": _save_result(query, result_text + "\n\n" + (fetched or ""), "bing"),
+                }
+    except Exception as e:
+        logger.info("Bing 直搜失败: %s", e)
+
+    # ===================================================================
+    #  方式 2：Qwen DashScope 内置搜索
+    # ===================================================================
+    if not _is_deepseek:
+        try:
+            from openai import OpenAI
+            api_key = os.getenv("QWEN_API_KEY", "")
+            base_url = os.getenv("QWEN_BASE_URL", "")
+            model = os.getenv("QWEN_MODEL", "qwen3.7-plus")
+            if api_key and base_url and "dashscope" in base_url.lower():
+                client = OpenAI(api_key=api_key, base_url=base_url, timeout=120)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content":
+                         f"请搜索：{query}，用中文总结搜索结果，列出具体信息"}
+                    ],
+                    temperature=0.3,
+                    extra_body={"enable_search": True},
+                )
+                reply = resp.choices[0].message.content or ""
+                if reply and len(reply) > 20:
+                    return {"result": reply, "source": "qwen_search", "query": query}
+        except Exception as e:
+            logger.info("Qwen 内置搜索不可用: %s", e)
+
+    # ===================================================================
+    #  方式 3：Bing 代理搜索（SEARCH_PROXY 兜底）
+    # ===================================================================
     proxy = os.environ.get("SEARCH_PROXY", "")
     if proxy:
         try:
-            import re as _re, urllib.parse, httpx
-            encoded = urllib.parse.quote(query)
+            import httpx
             p = proxy
             if p.startswith("socks"):
                 p = p.replace("socks5://", "http://").replace("socks5h://", "http://")
             with httpx.Client(proxy=p, timeout=15, follow_redirects=True) as client:
-                resp = client.get(f"https://www.bing.com/search?q={encoded}&setlang=zh-CN",
-                    headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "zh-CN"})
-                if resp.status_code == 200:
-                    texts = []
-                    for m in _re.findall(r'<p[^>]*class="b_lineclamp[^"]*"[^>]*>(.*?)</p>', resp.text):
-                        clean = _re.sub(r'<[^>]+>', '', m).strip()
-                        if clean and len(clean) > 10:
-                            texts.append(clean)
-                    for m in _re.findall(r'<h2>.*?<a[^>]*>(.*?)</a>', resp.text):
-                        clean = _re.sub(r'<[^>]+>', '', m).strip()
-                        if clean:
-                            texts.append(clean)
-                    if texts:
-                        return {"result": "\n".join(texts[:10]), "source": "bing", "query": query}
+                resp = client.get(
+                    f"https://www.bing.com/search?q={encoded}&setlang=zh-CN",
+                    headers=bing_headers,
+                )
+            if resp.status_code == 200:
+                texts = _parse_bing_results(resp.text)
+                if texts:
+                    return {"result": "\n".join(texts), "source": "bing_proxy", "query": query}
         except Exception as e:
-            logger.info("Bing 搜索失败: %s", e)
+            logger.info("Bing 代理搜索失败: %s", e)
 
     return {"error": "搜索服务暂不可用"}
 

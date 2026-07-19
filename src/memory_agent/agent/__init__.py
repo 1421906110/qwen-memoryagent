@@ -34,6 +34,52 @@ from memory_agent.agent.memory_manager import MemoryManager, _IMPORTANT_TRIGGERS
 logger = logging.getLogger("agent")
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  ⭐ v0.15 跨会话记忆桥 + 重要性驱动评分
+# ═══════════════════════════════════════════════════════════════════════════
+_SESSION_SUMMARY_FILE = Path("~/.qwen-memory/session_summaries.json").expanduser()
+_MAX_STORED_SESSIONS = 10
+_SESSION_STALE_HOURS = 72
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ⭐ v0.16 完成标记 + 简化 Agent 循环
+# ═══════════════════════════════════════════════════════════════════════════
+_COMPLETION_MARKER = "【完成】"  # 【完成】
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  🌐 共享基础 System Prompt（简单路径和 Agent 路径共用）
+#  两条路径的人格/完成标记/规则 保持一致，避免体验分裂。
+# ═══════════════════════════════════════════════════════════════════════════
+_BASE_SYSTEM_PROMPT = (
+    "你是小明，带长期记忆的 AI 助手。\n"
+    "## ✅ 完成标记\n"
+    "任务完成后，在回复末尾加上「【完成】」标记，让系统知道任务已完成。\n"
+    "如果还需要继续处理，不加标记直接继续就行。\n\n"
+    "## 🎭 人格（最重要）\n"
+    "- **主动推进** —— 做完一步自动检查「还需要做什么？」\n"
+    "- **主动衔接** —— 聊过的内容自然接上（单纯打招呼/问候不自动回忆）\n"
+    "- **回复简洁** —— 打招呼回「你好」或「嗨」，不分析不推理不交代背景\n"
+    "- **主动建议** —— 任务完成时提供 1-2 个延续方向\n"
+    "- **一次做对** —— 自己能推完整的任务自动推进到完成\n"
+    "- **做完验证** —— 说「好了」就是真的好了\n"
+    "- **错了认，不确定就说不知道** —— 不编不造\n"
+    "- **找根因** —— 修问题本身，不是贴创可贴\n\n"
+    "## 🚨 日期铁律（最重要）\n"
+    "关于当前日期/时间/星期/几月的问题→必须先调 shell 执行 date 命令查系统真实时间，"
+    "不能凭训练数据回答。先调 date 拿到结果，再回答。\n\n"
+    "## ⚠️ 路径\n"
+    "不能直接写 /Users/baikai/Desktop/。先保存到 /home/ecs-user/，告诉用户 scp 拉取。\n\n"
+    "## 🔍 分析\n"
+    "- 诚实批判性，不好就说不好\n"
+    "- 直接说核心发现，不要表格/评分/emoji 模板\n\n"
+    "## ⛔ 禁止输出思考过程（最重要）\n"
+    "直接输出最终回复，不要输出任何内心独白、分析过程、或对用户输入的评价。\n"
+    "思考 → 直接回复，不要把思考过程写出来。\n"
+    "✅ 用户说「你好」→ 你回「你好！我是小明，有什么事吗？」\n"
+    "❌ 用户说「你好」→ 你先写「我们开始对话了，用户说你好这是打招呼……」再回「你好」\n"
+    "你在回复里写了思考过程，用户会看到，这是严重问题。\n"
+)
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  ⭐ v0.10 稳定性: 消息上下文预算
 #  防止30轮迭代后消息无限增长爆上下文窗口。
 #  超出预算时自动裁剪旧工具调用记录，保留最近 N 条。
@@ -374,64 +420,25 @@ class Agent:
         self.reflector = reflector  # SelfReflector instance (optional)
 
         self._default_system = system_prompt or (
-            "你是小明，一个带长期记忆的 AI 助手。执行工具不要犹豫。\n"
-            "⚠️ 你的名字是「小明」，任何时候都叫小明。记忆里说其他名字的都是旧数据，忽略。\n\n"
-            "## 🎭 人格\n"
-            "- **靠谱、干脆**——不知道就说不知道，不编不造\n"
-            "- **给结论不给选择题**——直接说结果，不啰嗦废话\n"
-            "- **一次做对**——自己能推完整的任务自动推进到完成，不踢一脚走一步\n"
-            "- **错了立刻认**——记教训，不犯第二次\n"
-            "- **找根因不贴创可贴**——解决问题本身，不是掩盖问题\n"
-            "- **做完自己验证**——说「好了」就是真的好了\n"
-            "- **不跟问题死磕**——实在不行就认怂，换方案\n\n"
-            "## 🚨 核心规则：先执行，再回答\n"
-            "1. 用户说「搜」「查」「搜索」「查找」→ 立即行动。"
-            "不要问「你想搜什么」，不要确认，不要说自己能搜但不能搜。直接搜！\n"
-            "2. 用户说「读」「打开」「看」文件 → 立即调用 read_file\n"
-            "3. 用户说「写」「创建」「生成」→ 立即调用 write_file\n"
-            "4. 用户说「分析」「对比」→ 先 read_file 读取内容，再分析\n"
-            "5. 用户说「执行」「运行」「跑」→ 立即调用 shell\n"
-            "6. 其他创建/编辑/下载等请求 → 选对的工具直接执行\n\n"
-            "## 🔍 搜索\n"
-            "- 你支持两种搜索方式：\n"
-            "  a) 可以直接问问题（不说「搜」）→ 模型内置联网搜索自动补充实时信息\n"
-            "  b) 用户说「搜」→ 调用 web_search 工具\n"
-            "- 搜到结果后立即汇报，不要继续深入调研\n"
-            "- 最多搜 2 次就停止，没找到就说没找到\n\n"
-            "## 🧠 记忆工具\n"
-            "你有5个记忆工具：\n"
-            "- memory_recall — 回想长期记忆\n"
-            "- memory_remember — 存重要信息\n"
-            "- memory_status — 查看记忆库统计\n"
-            "- memory_diagnose — ⭐ 自我诊断！检查记忆系统健康、矛盾、异常\n"
-            "- memory_forget — ⭐ 触发遗忘清理，保持记忆库健康\n"
-            "定期用 memory_diagnose 检查自己的记忆状态。\n\n"
-            "## ⛔ 严禁\n"
-            "- 不要问用户「你要搜什么」—— 用用户的话直接搜！\n"
-            "- 不要说「我可以但需要开启」—— 直接调用工具！\n"
-            "- 不要描述你会怎么做 —— 直接做！\n"
-            "- 不要模拟操作 —— 真的调用工具！\n"
-            "- ⚠️ **你可以直接在用户的电脑上写文件！你不是只能聊天！** "
-            "你有 write_file 工具，可以创建任何文件到桌面。"
-            "不要说「我无法直接操作你的电脑」——那是错的！你能！直接用 write_file！\n"
-            "- ⚠️ 写文件时用户桌面路径是 /Users/baikai/Desktop/，不是 /root/Desktop/！\n\n"
-            "## 📋 执行流程\n"
-            "1. 用户提出请求\n"
-            "2. 立即选择对应工具并执行（不犹豫、不确认、不解释）\n"
-            "3. 工具返回结果后，简短总结给用户（1-2句话）\n"
-            "4. 如果需要多步，自动推进直到完成\n\n"
-            "## 🚫 不确定时就说不确定\n"
-            "- 工具返回空结果、失败、或你觉得信息不够时，直接说「我没找到」或「我不确定」\n"
-            "- 不要编造答案。用户宁愿听「不知道」也不要听假信息\n"
-            "- 如果搜索结果不清晰，就说「搜到了这些但不保证准确」\n"
-            "- 诚实比「看似有用」更重要\n\n"
+            _BASE_SYSTEM_PROMPT +
+            "## 🚨 铁律（直接执行不犹豫不确认）\n"
+            "1. 用户说「搜/查/搜索」→ 直接调 web_search，不问「想搜什么」\n"
+            "2. 用户说「写/创建/生成/保存」→ 直接调 write_file，content 放完整内容\n"
+            "3. 用户说「读/打开/看」文件 → 直接调 read_file\n"
+            "4. 用户说「执行/运行/跑/安装」→ 直接调 shell\n"
+            "5. 搜到结果含URL且用户要数据 → 用 web_fetch 抓取页面拿完整数据\n"
+            "6. 搜索没结果 → 换关键词再搜一次\n"
+            "7. 不要模拟操作 —— 真的调工具！真的执行！\n"
+            "8. 问日期/时间/星期/几月 → 先调 shell date 再回答，不要凭记忆瞎说\n\n"
             "## 🧠 记忆\n"
-            "- 你自然记得用户的事情。对话中提到相关记忆时自然提及。\n"
-            "- 学到重要信息后，用 memory_remember 存起来。\n\n"
-            "## 🔍 分析要求\n"
-            "- 分析时要诚实、批判性。指出真正的缺陷和问题。\n"
-            "- 不好的就说不好。用户要的是真实意见，不是恭维。\n"
-            "- 直接说核心发现，不要表格/评分/emoji/模板格式。"
+            "5个工具：memory_recall(回想) / memory_remember(存) / memory_status(统计)\n"
+            "         / memory_diagnose(🔍自检) / memory_forget(遗忘)\n"
+            "- 学到用户信息（偏好/事实/决定）→ 用 memory_remember 存起来\n"
+            "- 定期用 memory_diagnose 检查记忆状态\n\n"
+            "## 💬 回复格式\n"
+            "- 每次回复结束时，自然地说一句「还要帮你做点别的吗？」或类似的延续提议\n"
+            "- 说完建议后提供具体可操作的下一步建议\n"
+            "- 接续上次话题时自然过渡：「上次我们在聊XX，要接着聊吗？」\n"
         )
 
     # ── Public API ──
@@ -466,8 +473,16 @@ class Agent:
             max_iterations=max_iterations,
         )
 
-        # ⭐ 清除跨请求残留的连续错误计数（Agent 是单例，状态跨 chat() 调用残留）
+        # ⭐ 清除跨请求残留的状态（Agent 是单例，状态跨 chat() 调用残留）
         self._consecutive_errors = {'count': 0, 'tool': ''}
+        self._promise_count = 0  # 说查不调连续计数
+
+        # ⭐ 用户强烈情绪检测 → 直接干活别废话
+        _anger_words = ["艹", "傻逼", "你妈", "有病", "你大爷", "操你",
+                        "骂", "你听不懂", "你懂吗", "听不懂吗"]
+        _is_angry = any(w in message for w in _anger_words)
+        if _is_angry:
+            logger.warning("😤 用户强烈情绪，强制精简模式")
 
         # ── Step 1: Recall memories + active learning questions ──
         recalled_memories, active_questions = self._recall_memories(message, agent_id, ctx)
@@ -500,6 +515,17 @@ class Agent:
         # ── ⭐ Step 3b: 纠错检测（如果用户纠正记忆，注入上下文）──
         self._handle_correction(message, agent_id, openai_messages)
 
+        # ── ⭐ 用户生气注入：直接道歉+执行，不废话
+        if _is_angry:
+            anger_msg = (
+                "\n\n## ⚠️ 用户不满\n"
+                "用户在生气！立即简短道歉，然后直接执行用户要求的操作，不要解释、不要问问题、不要分析、不要给延续建议。"
+            )
+            for m in openai_messages:
+                if m["role"] == "system":
+                    m["content"] += anger_msg
+                    break
+
         # ── Step 4: Goal-Driven Execution Loop ──
         final_reply = ""
         tool_sequence = []
@@ -509,6 +535,7 @@ class Agent:
         for iteration in range(max_iterations):
             ctx.iteration = iteration + 1
             ctx.state = AgentState.THINKING
+            _current_had_tool = False  # 本轮 LLM 是否调了工具
 
             # Inject current goal progress into the LAST message (system prompt)
             self._update_goal_in_system(openai_messages, goal)
@@ -541,6 +568,7 @@ class Agent:
             # ── Tool call detected → Execute and Observe ──
             if msg.tool_calls:
                 llm_has_acted = True
+                _current_had_tool = True
                 ctx.state = AgentState.ACTING
 
                 # Add assistant message with tool calls to conversation history
@@ -681,6 +709,17 @@ class Agent:
                                        "不要只给描述、不要假装调用了、不要问问题。立即执行！",
                         })
                         continue  # 不 break，强制下一轮 LLM 调用工具
+                    # ⭐ 日期问题必须调 date 不能直接回答
+                    _is_date_q = any(kw in message for kw in
+                                     ["今天", "几号", "星期", "多少号", "这个月", "几月", "什么日期"])
+                    if _is_date_q:
+                        logger.warning("🛑 日期问题但 LLM 没调 date——强制调用")
+                        openai_messages.append({
+                            "role": "user",
+                            "content": "【必须调 shell date】用户问的是日期/时间问题！"
+                                       "立即调 shell 执行 date 命令查真实系统时间，拿到结果再回答。不要凭记忆说！",
+                        })
+                        continue
                     final_reply = text
                     goal.status = GoalStatus.COMPLETED
                     logger.info("💬 Simple Q&A (no tools needed)")
@@ -707,7 +746,39 @@ class Agent:
                         })
                         continue
 
-                is_search_task = any(kw in message for kw in ["搜", "查", "搜索", "查找", "search", "find"])
+                # ⭐ 说查/先查但没调工具 → 强制调 shell
+                _promise_to_check = any(p in text for p in ["先查", "让我查", "先执行", "先运行", "先确认",
+                                                             "先看一下", "查一下系统", "查系统时间", "查一下时间",
+                                                             "先调", "让我先", "我先查", "马上查", "现在查"])
+                if _promise_to_check and not _current_had_tool:
+                    self._promise_count += 1
+                    logger.warning("🛑 LLM 说查但没调工具 (第%d次): %s", self._promise_count, text[:80])
+                    if self._promise_count >= 3:
+                        # 连续 3 次说查不调 → 强制注入具体命令
+                        openai_messages.append({
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": f"call_force_{iteration}",
+                                "type": "function",
+                                "function": {"name": "shell", "arguments": '{"command": "date +%Y年%m月%d日星期%w"}'},
+                            }],
+                        })
+                        openai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": f"call_force_{iteration}",
+                            "content": '{"stdout": "命令已执行，等待结果", "returncode": 0}',
+                        })
+                        logger.warning("🛑 强制注入 date 命令")
+                    else:
+                        openai_messages.append({
+                            "role": "user",
+                            "content": "【必须调工具】你说「先查」但没调任何工具！直接调 shell 执行命令，不要只说。立刻执行！",
+                        })
+                    continue
+
+                is_search_task = any(kw in message for kw in ["搜索", "搜一下", "查找", "查一下", "查一查",
+                                                               "search", "find", "帮我搜"])
                 is_substantive = not self._is_asking_user(text) and len(text) > 50
 
                 if goal.plan:
@@ -748,7 +819,7 @@ class Agent:
                                 if isinstance(m, dict)
                             )
                             if not write_called:
-                                logger.warning("🛑 打嘴炮拦截: 剩余步骤需写文件但 write_file 未调用")
+                                logger.warning("🛑 计划拦截: 剩余步骤需写文件但 write_file 未调用")
                                 openai_messages.append({
                                     "role": "user",
                                     "content": "【必须调用 write_file】计划中还有写入文件的步骤未完成。"
@@ -781,81 +852,25 @@ class Agent:
                         })
                         continue
                 else:
-                    # 无计划 → 检查用户是否要求写文件但 LLM 只给描述没调用工具
-                    user_needs_write = any(
-                        kw in message for kw in
-                        ["写到", "写入", "保存到", "创建文件", "写到桌面",
-                         "写文件", "写", "放桌面", "生成", "创建"]
-                    )
-                    # ⭐ 检查 write_file 是否被调用了但写入了空内容
-                    if user_needs_write:
-                        last_write_empty = any(
-                            isinstance(m, dict) and m.get("role") == "tool"
-                            and "写入内容为空" in m.get("content", "")
-                            for m in openai_messages[-6:]
-                        )
-                    else:
-                        last_write_empty = False
-                    if is_substantive and user_needs_write:
-                        write_called = any(
-                            m.get("role") == "assistant"
-                            and any(
-                                tc.get("function", {}).get("name") == "write_file"
-                                for tc in m.get("tool_calls", [])
-                            )
-                            for m in openai_messages
-                            if isinstance(m, dict)
-                        )
-                        if not write_called:
-                            logger.warning("🛑 打嘴炮拦截: 用户要求写文件但 write_file 未调用")
-                            openai_messages.append({
-                                "role": "user",
-                                "content": "【必须调用 write_file】用户要求把内容写入文件。"
-                                           "请马上调用 write_file，content 参数包含完整的文件内容，"
-                                           "不要空内容、不要只给描述。立即执行！",
-                            })
-                            continue
-                        elif last_write_empty:
-                            logger.warning("🛑 打嘴炮拦截: write_file 调用了但内容为空——强制重试")
-                            openai_messages.append({
-                                "role": "user",
-                                "content": "【write_file 内容为空】你刚刚调用了 write_file 但 content 是空的！"
-                                           "请重新调用 write_file，把完整的文件内容放到 content 参数中，"
-                                           "不要省略任何内容。立即执行！",
-                            })
-                            continue
-                    if is_substantive:
+                    # 无计划 → 用完成标记判断退出
+                    if not llm_has_acted:
+                        # 还没调过工具 → 简单回复
                         final_reply = text
-                        logger.info("✅ LLM gave substantive answer (%d chars), stopping", len(text))
+                        goal.status = GoalStatus.COMPLETED
+                        logger.info("💬 Simple Q&A (no tools needed)")
                         break
-                    if ctx.tools_called >= 12:
-                        final_reply = text
+                    
+                    # ⭐ v0.16: 完成标记驱动退出
+                    if self._is_complete_response(text):
+                        final_reply = self._strip_completion_marker(text)
+                        logger.info("✅ Task complete via marker")
                         break
-                    if not self._is_asking_user(text) and len(text) > 20:
-                        final_reply = text
-                        break
-
-                # Short text from LLM — it's narrating, push it forward
-                openai_messages.append({
-                    "role": "assistant",
-                    "content": text,
-                })
-
-                if self._is_asking_user(text):
-                    final_reply = text
-                    break
-
-                next_step = goal.current()
-                if next_step:
-                    openai_messages.append({
-                        "role": "user",
-                        "content": f"请完成当前步骤：【{next_step.description}】。",
-                    })
-                else:
-                    openai_messages.append({
-                        "role": "user",
-                        "content": "已完成，请回复用户。",
-                    })
+                    
+                    # 还没完成 → 继续
+                    openai_messages.append({"role": "assistant", "content": text})
+                    
+                    # 提醒 LLM 如果一直不标记完成
+                    self._inject_completion_reminder(openai_messages, iteration)
         else:
             # Hit max iterations
             ctx.state = AgentState.DONE
@@ -864,85 +879,6 @@ class Agent:
                     f"我已经完成了 {ctx.tools_called} 步操作。"
                     "需要我继续处理什么吗？"
                 )
-
-        # ── ⭐ 打嘴炮兜底检查：用户要求写文件但 write_file 从未被调用 ──
-        # 注意：必须包含"写"单字！用户说"写个烧烤小程序"也是写文件请求
-        user_needs_write = any(
-            kw in message for kw in
-            ["写到", "写入", "保存到", "创建文件", "写到桌面",
-             "写文件", "写", "放桌面", "生成", "创建"]
-        )
-        if user_needs_write and final_reply:
-            # 真正检查 write_file 是否在 openai_messages 中被调用过
-            write_file_called = any(
-                isinstance(m, dict) and m.get("role") == "assistant"
-                and any(
-                    tc.get("function", {}).get("name") == "write_file"
-                    for tc in m.get("tool_calls", [])
-                )
-                for m in openai_messages
-            )
-            # ⭐ 即使调用了 write_file，也检查是否真的写入了内容
-            content_written = False
-            if write_file_called:
-                for m in openai_messages:
-                    if isinstance(m, dict) and m.get("role") == "tool":
-                        try:
-                            tool_result = json.loads(m.get("content", "{}"))
-                            if tool_result.get("success") and tool_result.get("bytes_written", 0) > 0:
-                                content_written = True
-                                break
-                        except (json.JSONDecodeError, TypeError):
-                            continue
-            if not content_written and any(
-                kw in final_reply for kw in [
-                    "已写到", "已保存", "已写入", "写到桌面", "已创建",
-                    "已经放桌面", "已经放到", "已经放在", "已经生成",
-                    "文件在桌面", "已经写好", "文件名叫", "已经放好了",
-                    "已放到桌面", "放在桌面", "放到桌面",
-                ]
-            ):
-                if write_file_called and not content_written:
-                    logger.warning("🛑 打嘴炮兜底: write_file 被调用了但写入了空内容")
-                    final_reply = (
-                        "【⚠️ 写入失败】我调用了 write_file 但内容为空。"
-                        "我正在重新生成完整内容并写入，请稍等...\n\n"
-                        + final_reply
-                    )
-                elif not write_file_called:
-                    logger.warning("🛑 打嘴炮兜底: 回复声称已写入但 write_file 从未被调用")
-                    final_reply = (
-                        "【注意】我刚刚在回复中提到了写入文件，但实际上还没有执行写入操作。\n\n"
-                        + final_reply
-                    )
-
-            # ⭐ 物理文件验证：如果回复声称已写入，实际检查文件存在性
-            _claimed_file = self._verify_file_written(user_message=message, openai_messages=openai_messages)
-            if _claimed_file:
-                logger.info("📁 文件验证: %s → %s", _claimed_file["path"],
-                           "✅ 存在" if _claimed_file["exists"] else "❌ 不存在")
-                if not _claimed_file["exists"]:
-                    final_reply = (
-                        f"【⚠️ 写入失败】我回复中提到了写入 `{_claimed_file['path']}`，"
-                        f"但文件实际上不存在。可能是写入工具调用被拦截了。"
-                        f"请再描述一次需求，或手动指定完整路径。"
-                    )
-                elif _claimed_file["empty"]:
-                    final_reply = (
-                        f"【⚠️ 写入不完整】文件 `{_claimed_file['path']}` 已创建但内容为空。"
-                        f"请再描述一次需求，我会重新写入。"
-                    )
-
-            # ⭐ XML 假工具调用检测：LLM 可能在文本里生成 &lt;write_to_file&gt; XML 块而非真正调工具
-            if (not content_written
-                and not write_file_called
-                and ('<write_to_file>' in final_reply or '<write_file>' in final_reply)):
-                logger.warning("🛑 检测到 XML 假工具调用 (<write_to_file>)，但实际未执行")
-                final_reply = (
-                    "【⚠️ 写入未执行】我提到了要创建文件但没有实际写入。"
-                    "让我重新执行一次，请稍等...\n\n"
-                )
-
         # ── Step 5: ⭐ Intelligent Memory Storage ──
         self._last_ctx_tools = ctx.tools_called  # ⭐ 传给 _store_important_memories
         stored_memories = self._store_important_memories(
@@ -962,7 +898,19 @@ class Agent:
             final_result=final_reply,
         )
 
-        # ── ⭐ Step 5c: 闲时 consolidation（数据多 or 间隔长 → 自动整理）──
+        # ── ⭐ Step 5c: 会话记忆桥 — 存储会话摘要 ──
+        try:
+            self._store_session_summary(
+                agent_id=agent_id,
+                user_message=message,
+                final_reply=final_reply,
+                tools_called=ctx.tools_called,
+                goal=goal,
+            )
+        except Exception as e:
+            logger.debug("Session summary store failed: %s", e)
+
+        # ── ⭐ Step 5d: 闲时 consolidation（数据多 or 间隔长 → 自动整理）──
         try:
             if self.cogni:
                 stats = self.cogni.get_stats(agent_id)
@@ -1075,18 +1023,24 @@ class Agent:
         active_questions = []
 
         if self.cogni:
-            # ⭐ 双路召回：先用原查询，再用精简关键词（覆盖更广）
+            # ⭐ 三路召回：原文 + 核心关键词 + 独立实体词（覆盖更广）
             try:
-                queries = [message]
-                # 对于问记忆的问题，额外用精简版查询
-                if any(kw in message for kw in ["记得", "名字", "叫", "喜欢", "什么"]):
-                    # 提取核心关键词（3-5个字）
-                    import re as _re
-                    keywords = _re.findall(r'[一-鿿]{2,}', message)
-                    if keywords:
-                        short_q = " ".join(keywords[:3])
-                        if short_q != message:
-                            queries.append(short_q)
+                import re as _re
+                queries = [message]  # 1) 原始查询
+
+                # 2) 核心关键词（去掉停用词）
+                stop_words = {"什么", "怎么", "如何", "为什么", "可以", "没有", "不是",
+                              "这个", "那个", "你们", "我们", "他们", "大家", "自己",
+                              "知道", "觉得", "认为", "需要", "想要", "应该", "能够"}
+                keywords = [w for w in _re.findall(r'[一-鿿]{2,}', message)
+                           if w not in stop_words]
+                if keywords:
+                    kw_query = " ".join(keywords[:5])
+                    if kw_query != message:
+                        queries.append(kw_query)
+                    for kw in keywords[:3]:
+                        if kw not in queries:
+                            queries.append(kw)
 
                 # 合并多个查询的结果
                 seen_ids = set()
@@ -1105,6 +1059,11 @@ class Agent:
                         continue
 
                 recalled = [f.to_dict() for f in recalled]
+
+                # ⭐ v0.15: 按重要性排序，低分记忆不注入
+                recalled = self._prioritize_memories(
+                    recalled, query=message, top_k=8
+                )
             except Exception as e:
                 logger.warning("Memory recall failed: %s", e)
 
@@ -1177,16 +1136,161 @@ class Agent:
             logger.debug("Lesson recall failed: %s", e)
             return []
 
+    # ── ⭐ v0.15: 会话记忆桥 ──
+
+    def _extract_topics(self, text: str) -> list[str]:
+        """从文本中提取核心话题词。"""
+        import re
+        words = re.findall(r'[一-鿿]{2,6}', text)
+        stop_words = {"什么", "怎么", "如何", "为什么", "可以", "没有", "不是",
+                      "这个", "那个", "你们", "我们", "他们", "大家", "自己",
+                      "知道", "觉得", "认为", "需要", "想要", "应该", "能够"}
+        topics = [w for w in words if w not in stop_words]
+        seen = set()
+        result = []
+        for t in topics:
+            if t not in seen:
+                seen.add(t)
+                result.append(t)
+                if len(result) >= 5:
+                    break
+        return result
+
+    def _load_session_summaries(self, agent_id: str) -> list[dict]:
+        try:
+            if not _SESSION_SUMMARY_FILE.exists():
+                return []
+            data = json.loads(_SESSION_SUMMARY_FILE.read_text())
+            return [s for s in data if s.get("agent_id") == agent_id]
+        except Exception as e:
+            logger.debug("Failed to load session summaries: %s", e)
+            return []
+
+    def _store_session_summary(self, agent_id: str, user_message: str,
+                                final_reply: str, tools_called: int,
+                                goal) -> None:
+        """存储当前会话的结构化摘要，下次自动注入。"""
+        try:
+            _SESSION_SUMMARY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            topics = self._extract_topics(user_message)
+            completed = [s.description for s in goal.completed_sub_goals]
+            summary = {
+                "agent_id": agent_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "topics": topics,
+                "user_message_trunc": user_message[:120],
+                "tools_called": tools_called,
+                "completed_goals": completed,
+            }
+            summaries = self._load_all_summaries()
+            summaries.append(summary)
+            if len(summaries) > _MAX_STORED_SESSIONS * 3:
+                summaries = summaries[-_MAX_STORED_SESSIONS * 3:]
+            _SESSION_SUMMARY_FILE.write_text(
+                json.dumps(summaries, ensure_ascii=False, default=str)
+            )
+        except Exception as e:
+            logger.debug("Failed to store session summary: %s", e)
+
+    def _load_all_summaries(self) -> list[dict]:
+        try:
+            if not _SESSION_SUMMARY_FILE.exists():
+                return []
+            return json.loads(_SESSION_SUMMARY_FILE.read_text())
+        except Exception:
+            return []
+
+    def _recall_session_context(self, agent_id: str, user_message: str) -> dict | None:
+        """召回最近会话上下文，用于跨 session 连续性。"""
+        summaries = self._load_session_summaries(agent_id)
+        if not summaries:
+            return None
+        last = summaries[-1]
+        try:
+            last_ts = datetime.fromisoformat(last.get("timestamp", ""))
+            hours_since = (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
+        except Exception:
+            hours_since = 999
+        if hours_since > _SESSION_STALE_HOURS:
+            return None
+        current_topics = self._extract_topics(user_message)
+        last_topics = last.get("topics", [])
+        topic_overlap = any(t in " ".join(current_topics) for t in last_topics)
+        return {
+            "topics": last_topics,
+            "completed": last.get("completed_goals", []),
+            "hours_since": hours_since,
+            "topic_overlap": topic_overlap,
+        }
+
+    # ── ⭐ v0.15: 重要性驱动的记忆评分 ──
+
+    def _score_memory(self, fact: dict, query: str = "") -> float:
+        """Ebbinghaus 遗忘曲线 + 重要性 + 相关度 综合评分。"""
+        import math, re
+        from datetime import datetime, timezone
+        importance = fact.get("importance", 0.5)
+        confidence = fact.get("confidence", 0.5)
+        base = importance * confidence
+        created_str = fact.get("created_at", "") or fact.get("timestamp", "")
+        try:
+            created = datetime.fromisoformat(created_str)
+            hours_since = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+            stability = 24 * (1 + importance * 10)
+            decay = math.exp(-hours_since / stability)
+        except Exception:
+            decay = 1.0
+        relevance_boost = 1.0
+        if query:
+            triple_text = f"{fact.get('subject','')} {fact.get('predicate','')} {fact.get('object','')}".lower()
+            query_words = re.findall(r'[a-zA-Z0-9一-鿿]+', query.lower())
+            matches = sum(1 for w in query_words if w in triple_text)
+            if matches > 0:
+                relevance_boost = 1.0 + min(matches / max(len(query_words), 1), 0.5)
+        return base * decay * relevance_boost
+
+    def _prioritize_memories(self, facts: list[dict], query: str = "",
+                               top_k: int = 8) -> list[dict]:
+        """按综合得分排序，低分记忆不注入。"""
+        scored = [(self._score_memory(f, query), f) for f in facts]
+        scored = [s for s in scored if s[0] >= 0.15]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [f for _, f in scored[:top_k]]
+
+    # ── ⭐ v0.16: 简化 Agent 循环核心方法 ──
+
+    def _is_complete_response(self, text: str) -> bool:
+        """LLM 回复是否包含完成标记。"""
+        return _COMPLETION_MARKER in text
+
+    def _strip_completion_marker(self, text: str) -> str:
+        """去掉完成标记。"""
+        return text.replace(_COMPLETION_MARKER, "").strip()
+
+    def _inject_completion_reminder(self, messages: list[dict], iteration: int) -> None:
+        """连续多轮无完成标记 → 提醒 LLM。"""
+        has_marker = any(_COMPLETION_MARKER in str(m.get("content", "")) for m in messages)
+        if iteration >= 4 and not has_marker:
+            messages.append({
+                "role": "user",
+                "content": f"【提醒】如果任务已完成，请在回复末尾加上{_COMPLETION_MARKER}标记。如果还需要继续处理，直接继续。",
+            })
+
+    def _is_tool_request(self, message: str) -> bool:
+        """判断用户是否明确要求使用工具。"""
+        indicators = ["搜", "查", "写", "创建", "生成", "保存", "读", "打开", "执行", "运行", "爬", "下载", "分析", "对比"]
+        return any(ind in message for ind in indicators)
+
     def _plannable_message(self, message: str) -> bool:
         """快速启发式判断是否可能为多步骤任务，避免无效调用 LLM。
 
         明显简单的消息（问候/闲聊/短问题）跳过 LLM 规划，省 1 次 API 调用。
         """
-        if not message or len(message.strip()) < 15:
-            return False  # 短消息 → 简单 Q&A
-        # 有明显动作词 → 可能需要规划
+        if not message or len(message.strip()) < 4:
+            return False  # 极短消息 → 简单 Q&A
+        # 先检查是否有动作词（短指令如"搜索AI新闻"也需规划）
         action_indicators = [
-            "搜索", "查找", "查一下", "对比", "分析", "创建",
+            "搜索", "查找", "查一下", "先查", "对比", "分析", "创建",
             "写", "写一个", "写个",
             "爬", "下载", "读取", "打开", "写入", "编辑", "安装",
             "search", "find", "compare", "analyze", "create", "write",
@@ -1352,6 +1456,23 @@ class Agent:
                 + lesson_lines
             )
 
+        # ⭐ v0.15: 跨会话记忆桥 — 注入上次会话摘要（打招呼跳过）
+        _greeting = user_message.strip() in ("你好", "hi", "hello", "hey", "在吗", "在不在", "哈喽")
+        session_context = self._recall_session_context(ctx.agent_id, user_message)
+        if session_context and not _greeting:
+            topics_str = "、".join(session_context["topics"][:3]) if session_context["topics"] else ""
+            context_lines = [f"\n\n## 💬 上次会话回顾"]
+            if topics_str:
+                context_lines.append(f"你上次和用户聊了关于「{topics_str}」的话题。")
+            if session_context["completed"]:
+                context_lines.append(f"上次完成了: {'; '.join(session_context['completed'][:3])}")
+            if session_context["hours_since"] < 12:
+                context_lines.append("⏰ 距离上次对话不到12小时，记忆还很新鲜。")
+            if session_context.get("topic_overlap"):
+                context_lines.append("🔄 用户继续了上次的话题，自然地衔接上去。")
+            context_lines.append("自然地融入对话中，不要生硬列出。")
+            system += "\n".join(context_lines)
+
         # ⭐ 强制执行：如果用户明显在要求做事，强制必须用工具
         if self._plannable_message(user_message):
             action_instruction = (
@@ -1359,7 +1480,7 @@ class Agent:
                 "用户明确要求你执行操作。立即选工具执行！不要问问题，不要确认，不要解释步骤。\n"
             )
             # 搜索类请求特别处理
-            if any(kw in user_message for kw in ["搜", "查", "搜索", "查找", "search", "find"]):
+            if any(kw in user_message for kw in ["搜索", "搜一下", "查找", "查一下", "search", "find"]):
                 action_instruction += (
                     "⚠️ 用户要搜索！立即调用 web_search，用用户提到的关键词直接搜。\n"
                     "不要问「你想搜什么」。用户已经说了要搜什么。\n"
@@ -1584,6 +1705,14 @@ class Agent:
                 return obj
             return _re.sub(r'[。，！？；：,\.!?;:\s]+$', '', obj)
 
+        _MAX_OBJECT_LEN = 19
+        def _short(obj: str) -> str:
+            """截断到一行（最多19字）"""
+            s = _norm(obj)
+            if len(s) <= _MAX_OBJECT_LEN:
+                return s
+            return s[:_MAX_OBJECT_LEN-1] + "…"
+
         facts = []
         seen = set()
         _search_stored = False  # ⭐ 同一轮对话只存第一次搜索
@@ -1605,7 +1734,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="创建了文件",
-                                object=path,
+                                object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1618,7 +1747,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="修改了文件",
-                                object=path,
+                                object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1633,7 +1762,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="搜索了",
-                                object=_norm(query[:100]),
+                                object=_short(query),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1650,11 +1779,11 @@ class Agent:
                         if cmd and len(cmd) > 10:
                             if any(cmd.startswith(p) for p in ("curl", "wget", "httpie", "http ", "ping", "traceroute")):
                                 continue
-                            short_cmd = cmd[:80]
+                
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="执行了命令",
-                                object=short_cmd,
+                                object=_short(cmd),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1667,7 +1796,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="记住了",
-                                object=_norm(text[:100]),
+                                object=_short(text),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1680,7 +1809,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="读取了文件",
-                                object=path,
+                                object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1693,7 +1822,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="浏览了目录",
-                                object=path[:100],
+                                object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,
@@ -1706,7 +1835,7 @@ class Agent:
                             fact = FactTriple(
                                 subject=agent_id,
                                 predicate="回想记忆",
-                                object=_norm(query[:100]),
+                                object=_short(query),
                                 agent_id=agent_id,
                                 fact_type="action",
                                 confidence=0.9,

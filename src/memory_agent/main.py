@@ -36,12 +36,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import json
+import re
 
 from memory_agent.models import MemoryRecord
 from memory_agent.services.llm_client import LLMClient
 from memory_agent.services.memory_service import MemoryService
 from memory_agent.storage import SQLiteStore
-from memory_agent.agent import Agent, SelfReflector, ToolRegistry
+from memory_agent.agent import Agent, SelfReflector, ToolRegistry, _BASE_SYSTEM_PROMPT
 from memory_agent.agent.tools import register_all_tools
 from cognimem.core.brain import CogniMem
 from cognimem.core.db import DatabaseAdapter
@@ -107,6 +108,67 @@ def _ts_to_epoch(ts_val) -> int:
         except (ValueError, TypeError):
             return 0
     return 0
+
+
+def _strip_thinking_text(text: str) -> str:
+    """去掉 LLM 回复开头的内心独白/思考过程，只保留实际回复。
+
+    LLM 有时会在正式回复前输出分析过程（如「用户打招呼了……」「根据系统提示，
+    关于日期问题必须……」），这段文字不应该显示给用户。
+    """
+    text = text.strip()
+    if not text:
+        return text
+
+    segments = re.split(r'(?<=[。！？!?\n])', text)
+    segments = [s.strip() for s in segments if s.strip()]
+    if len(segments) < 2:
+        return text
+
+    # 思考信号集合（按长度倒序防子串误配）
+    _think_signals = sorted([
+        # 提醒/规则型
+        "系统提示", "注意", "铁律", "规则要求",
+        # 引用用户/分析输入型
+        "用户说", "用户问", "用户打招呼", "用户当前",
+        "我们开始对话", "我们被问到",
+        # 自我指涉规划型
+        "作为小明", "作为AI", "我作为", "我应该", "我需要",
+        "需要回答", "需要列", "需要查", "需要先",
+        "最好先确认", "先确认", "必须先", "必须调", "先调",
+        "然后列", "然后回答", "然后直接",
+        "我们先", "我先",
+        # 引述规则型
+        "按照规则", "按照要求",
+        "关于日期", "关于时间",
+        # 结论引导型
+        "所以直接回答", "所以直接", "所以现在", "所以这个",
+        "所以我们", "因此我们", "因此直接",
+        "但根据", "但如果", "但我", "不过", "但那是",
+        "那么我", "那么直接",
+        # 直接回答规划型
+        "直接回答", "直接回复", "直接回",
+        "自然回应", "简洁回应",
+        "不需要加", "不用回忆", "不回忆不推理",
+        # 当前日期/时间分析型（注意：节点包含各种变体）
+        "当前日期是", "当前日期已", "当前时间已", "当前时间是", "当前是",
+        # 其他推理/说明型
+        "由于是", "另外", "此外，注意", "最后，",
+        "需要准确", "任务完成后", "需要列出",
+        # 关于问题引述
+        "关于这个", "关于你",
+    ], key=len, reverse=True)
+
+    for i, seg in enumerate(segments):
+        s = seg[:50]
+        # 检查是否匹配任何思考信号
+        is_think = "根据" in s[:20] or any(x in s for x in _think_signals)
+        if not is_think:
+            return "".join(segments[i:])
+
+    return segments[-1]
+        # 弱标记检查（需≥2）
+
 
 # ---------------------------------------------------------------------------
 #  Globals (initialised in lifespan)
@@ -573,9 +635,26 @@ def _build_context(
         ]
 
     # ── 系统提示词 + 图谱注入 ──
-    system = "你是小明，带长期记忆的 AI 助手。简洁直接。\n⚠️ 你叫小明。\n你的能力：搜索信息、查网页、**直接在你的电脑上读写文件**、运行代码、执行命令、记住用户偏好和事实。用户叫你写文件一定要用 write_file 工具，不要光给代码让用户自己复制！\n"
+    system = _BASE_SYSTEM_PROMPT
+
+    # ⭐ 日期问题：直接执行 date 注入结果（不走 Agent 循环也能答对）
+    DATE_KW = ["今天", "几号", "星期", "多少号", "这个月", "几月",
+               "多少天", "当前时间", "现在时间", "年月日", "什么日期"]
+    if any(kw in user_message for kw in DATE_KW):
+        import subprocess as _sp
+        try:
+            _r = _sp.run(["date", "+%Y年%m月%d日 星期%w %H:%M"], capture_output=True, text=True, timeout=5)
+            _ds = _r.stdout.strip()
+            for k, v in {"0":"日","1":"一","2":"二","3":"三","4":"四","5":"五","6":"六"}.items():
+                _ds = _ds.replace(f"星期{k}", f"星期{v}")
+            system = f"## ⏰ 当前时间（已用 date 命令确认）\n{_ds}\n直接回答日期问题，不要输出任何思考过程或「我们被问到」之类的废话。\n\n" + system
+            logger.info("📅 [build_context] 预注入 date=%s", _ds[:30])
+        except Exception:
+            pass
 
     if recalled:
+        # ⭐ 重要性排序
+        recalled.sort(key=lambda f: f.get("confidence", 0.5) * f.get("importance", 0.5), reverse=True)
         lines = []
         for f in recalled[:4]:
             s = f.get("subject", "")
@@ -585,9 +664,43 @@ def _build_context(
                 s = "你"
             if any(kw in (p + o) for kw in ["小七", "小智", "小可爱"]):
                 continue
+            conf = f.get("confidence", 0.5)
+            if conf < 0.3:
+                continue
             lines.append(f"- {s}{p}{o}")
         if lines:
-            system += "\n🧠 我记得\n" + "\n".join(lines) + "\n"
+            system += "\U0001f9e0 我记得\n" + "\n".join(lines) + "\n"
+
+    # ⭐ v0.15: 跨会话记忆桥
+    try:
+        summary_file = Path("~/.qwen-memory/session_summaries.json").expanduser()
+        if summary_file.exists():
+            all_summ = json.loads(summary_file.read_text())
+            agent_summ = [s for s in all_summ if s.get("agent_id") == agent_id]
+            if agent_summ:
+                last = agent_summ[-1]
+                from datetime import datetime, timezone
+                try:
+                    last_ts = datetime.fromisoformat(last.get("timestamp", ""))
+                    hours = (datetime.now(timezone.utc) - last_ts).total_seconds() / 3600
+                except Exception:
+                    hours = 999
+                # 打招呼不自动回忆
+                _is_greeting = user_message.strip() in ("你好", "hi", "hello", "hey", "在吗", "在不在", "哈喽")
+                if hours < 72 and not _is_greeting:
+                    topics = last.get("topics", [])
+                    if topics:
+                        system += f"\U0001f4ac 上次聊过 {'、'.join(topics[:3])}\n"
+    except Exception:
+        pass
+
+    # ⭐ 简单路径最后强指令：禁止思考过程
+    system += (
+        "\n\n## ⛔ 只输出最终回复\n"
+        "你的回复会被直接展示给用户，不能包含任何思考、分析、内心独白。\n"
+        "✅ 用户问日期 → 你回「2026年7月19日」\n"
+        "❌ 用户问日期 → 你不能写「根据系统时间，当前是2026年7月…」"
+    )
 
     msgs = [{"role": "system", "content": system}]
     # 如果 recent 最后一条就是当前 user 消息，跳过重复
@@ -622,7 +735,7 @@ async def chat_stream(req: ChatRequest):
         # ── 判断简单问答还是复杂任务 ──
         msg = req.message.strip()
         ACTION_WORDS = [
-            "搜", "搜索", "查", "查找", "爬", "下载", "读取",
+            "搜索", "搜一下", "查找", "查一下", "查一查", "先查", "爬", "下载", "读取",
             "写入", "编辑", "分析", "对比", "创建", "写", "生成",
             "改", "删", "跑", "试", "调用", "执行", "运行",
             "总结", "翻译", "推荐", "画", "整理", "记住", "计算",
@@ -640,7 +753,14 @@ async def chat_stream(req: ChatRequest):
 
         try:
             if is_simple:
-                # ⭐ 简单路径：先试流式（速度快、首 token 秒出）
+                # ⭐ 纯打招呼 → 硬编码回复，不走 LLM（避免思考过程泄漏）
+                if msg.strip() in ("你好", "hi", "hello", "hey", "在吗", "哈喽", "您好"):
+                    yield f"data: {json.dumps({'type': 'token', 'content': '你好！我是小明，有什么事吗？'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+                    _record_api_call(success=True)
+                    return
+
+                # ⭐ 简单路径：先收集完整回复再过滤思考过程
                 full_text = ""
                 stream = llm.chat_stream(
                     messages=llm_messages,
@@ -650,10 +770,12 @@ async def chat_stream(req: ChatRequest):
                 )
                 for token in stream:
                     full_text += token
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+
+                # ⭐ 去除 LLM 输出中的内心独白/思考过程
+                cleaned = _strip_thinking_text(full_text)
 
                 # ⭐ 空响应保护：LLM 返回空时自动降级到 Agent 路径
-                if not full_text.strip():
+                if not cleaned.strip():
                     logger.warning("🛑 LLM returned empty for simple query — falling back to agent")
                     _record_api_call(success=False, error_msg="empty_response")
                     # ⭐ 子线程执行，不阻塞事件循环
@@ -676,12 +798,13 @@ async def chat_stream(req: ChatRequest):
                     if reply:
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                     else:
-                        # 通用兜底：至少尊重用户的问题
-                        reply = f"我是小明！你刚才问的是「{req.message[:30]}」，让我直接回答你——我能帮你搜索信息、查找网页、读写文件、运行代码、记住事情，还有更多能力。有什么具体需求尽管说！"
+                        reply = f"抱歉没处理好。你说「{req.message[:30]}」，我再试一次。"
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                     yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
                     return
 
+                # ⭐ 整个输出清理后的回复（快速响应比逐句更可靠）
+                yield f"data: {json.dumps({'type': 'token', 'content': cleaned})}\n\n"
                 _record_api_call(success=True)
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             else:
@@ -711,10 +834,8 @@ async def chat_stream(req: ChatRequest):
                 if not reply.strip():
                     logger.warning("🛑 Agent returned empty reply — using fallback")
                     reply = (
-                        f"我是小明！你刚刚说「{req.message[:40]}」，"
-                        "我听到了。我不确定你需要什么具体操作——"
-                        "我可以帮你搜索信息、看网页、读写文件、或者记住事情。"
-                        "直接告诉我想干什么就行！"
+                        f"抱歉，我刚才没正确处理。你说「{req.message[:40]}」，"
+                        "能再说一次吗？我一定直接执行，不废话。"
                     )
 
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
@@ -906,9 +1027,10 @@ async def decay_analysis(agent_id: str, min_confidence: float = 0.0):
                 "is_summary": True,
             })
         for f in raw_facts:
+            _full = f"{f.get('subject','')} {f.get('predicate','')} {f.get('object','')}"
             memories.append({
                 "id": f.get("fact_id", ""),
-                "content": f"{f.get('subject','')} {f.get('predicate','')} {f.get('object','')}",
+                "content": _full if len(_full) <= 19 else _full[:16] + "…",
                 "memory_type": f.get("fact_type", "observation"),
                 "confidence": f.get("confidence", 0.5),
                 "tags": f.get("context_tags", []),
