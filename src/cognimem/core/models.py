@@ -62,7 +62,7 @@ class FactTriple:
             self.importance = 0.5
         self.importance = max(0.0, min(1.0, self.importance))
         # encoding_level 校验：仅允许已知值
-        valid_levels = {"raw", "compressed", "core", "abstraction", "abstracted", "credential"}
+        valid_levels = {"raw", "compressed", "core", "abstraction", "abstracted", "credential", "graduated"}
         if self.encoding_level not in valid_levels:
             self.encoding_level = "raw"
 

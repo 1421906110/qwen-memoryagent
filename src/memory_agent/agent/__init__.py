@@ -930,6 +930,13 @@ class Agent:
         except Exception as e:
             logger.debug("Auto-consolidation skipped: %s", e)
 
+        # ── ⭐ Step 5e: 自动毕业 — 高频但休眠记忆不再占用上下文 ──
+        try:
+            if self.cogni:
+                self._auto_graduate_memories(agent_id)
+        except Exception as e:
+            logger.debug("Auto-graduation skipped: %s", e)
+
         # ── Step 6: Return ──
         ctx.state = AgentState.DONE
         logger.info(
@@ -1301,10 +1308,59 @@ class Agent:
 
         return base * decay * freshness * contradiction_penalty * freq_boost * relevance_boost
 
+    def _auto_graduate_memories(self, agent_id: str):
+        """自动毕业：高频访问但长期未使用的记忆 → 标记为graduated
+
+        毕业条件：
+        - access_count >= 10（被频繁访问过）
+        - 超过 7 天未访问
+        - confidence >= 0.6（足够可靠才能毕业）
+        - 不是 action 类型（动作记忆不需要毕业）
+        - encoding_level 不是 graduated（不重复标记）
+        """
+        from datetime import datetime, timezone
+        try:
+            facts = self.cogni.fact_network.get_all_facts(agent_id)
+        except Exception:
+            return
+
+        now = datetime.now(timezone.utc)
+        graduated = 0
+        for fact in facts:
+            if fact.encoding_level == "graduated":
+                continue
+            if fact.fact_type == "action":
+                continue
+            if fact.confidence < 0.6:
+                continue
+            if fact.access_count < 10:
+                continue
+            try:
+                last_access = datetime.fromisoformat(fact.accessed_at)
+                days_since = (now - last_access).total_seconds() / 86400
+            except Exception:
+                continue
+            if days_since < 7:
+                continue
+
+            try:
+                fact.encoding_level = "graduated"
+                self.cogni.fact_network.db.update_fact(fact)
+                self.cogni.fact_network._cache_put(fact)
+                graduated += 1
+            except Exception:
+                continue
+
+        if graduated:
+            logger.info("🎓 毕业 %d 条记忆，不再占用上下文", graduated)
+
     def _is_blocked_memory(self, fact: dict) -> bool:
         """检查记忆是否应被屏蔽（不进上下文）。"""
         # 凭证类 → 屏蔽
         if fact.get("encoding_level") == "credential" or fact.get("fact_type") == "credential":
+            return True
+        # 已毕业 → 屏蔽（除非被显式查询）
+        if fact.get("encoding_level") == "graduated":
             return True
         # 置信度极低 → 屏蔽
         if fact.get("confidence", 0.5) < 0.15:

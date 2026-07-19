@@ -293,6 +293,10 @@ class FactNetwork:
             return []
         return self.db.search_facts_vector(agent_id, query, top_k)
 
+    def get_all_facts(self, agent_id: str = "default") -> list[FactTriple]:
+        """获取指定 agent 的所有事实（用于批量操作如毕业）"""
+        return list(self._get_agent_facts(agent_id))
+
     def recall_by_triple(self, subject: str, predicate: str | None = None,
                          agent_id: str = "default") -> list[FactTriple]:
         """精确三元组查询: 找出所有 (subject, predicate, ?) 的事实"""
