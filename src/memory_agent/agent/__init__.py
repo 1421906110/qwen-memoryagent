@@ -1223,15 +1223,40 @@ class Agent:
             "topic_overlap": topic_overlap,
         }
 
-    # ── ⭐ v0.15: 重要性驱动的记忆评分 ──
+    # ── ⭐ v0.16: 记忆治理评分（ERINYS式改进）──
 
     def _score_memory(self, fact: dict, query: str = "") -> float:
-        """Ebbinghaus 遗忘曲线 + 重要性 + 相关度 综合评分。"""
+        """
+        六信号综合评分（对标 ERINYS 记忆治理层）：
+        1. 重要度 (importance) — 事实本身的重要性
+        2. 可信度 (confidence) — 置信度
+        3. 类型优先级 (type priority) — preference > fact > goal > observation > action
+        4. 新鲜度 (freshness) — 近期访问过加分
+        5. 矛盾降级 (contradiction penalty) — 有矛盾记录扣分
+        6. 相关度 (relevance boost) — 与当前查询匹配加分
+        """
         import math, re
         from datetime import datetime, timezone
+
+        # 1-2. 基础分 = 重要度 × 可信度
         importance = fact.get("importance", 0.5)
         confidence = fact.get("confidence", 0.5)
         base = importance * confidence
+
+        # 3. 类型优先级权重
+        _type_weights = {
+            "preference": 1.4,  # 用户偏好 → 最高
+            "goal": 1.3,        # 目标 → 高
+            "fact": 1.2,        # 事实 → 较重要
+            "decision": 1.2,    # 决策 → 重要
+            "observation": 1.0, # 观察 → 中性
+            "action": 0.7,      # 动作 → 低优先级
+        }
+        ftype = fact.get("fact_type", "observation")
+        type_weight = _type_weights.get(ftype, 1.0)
+        base *= type_weight
+
+        # 4. 遗忘衰减（Ebbinghaus）
         created_str = fact.get("created_at", "") or fact.get("timestamp", "")
         try:
             created = datetime.fromisoformat(created_str)
@@ -1240,6 +1265,32 @@ class Agent:
             decay = math.exp(-hours_since / stability)
         except Exception:
             decay = 1.0
+
+        # 5. 新鲜度加分：近期访问过
+        freshness = 1.0
+        try:
+            accessed_str = fact.get("accessed_at", "")
+            if accessed_str:
+                accessed = datetime.fromisoformat(accessed_str)
+                hours_ago = (datetime.now(timezone.utc) - accessed).total_seconds() / 3600
+                if hours_ago < 1:      # 1小时内 → 大幅加分
+                    freshness = 1.5
+                elif hours_ago < 6:    # 6小时内 → 小幅加分
+                    freshness = 1.2
+                elif hours_ago < 24:   # 24小时内 → 微量加分
+                    freshness = 1.05
+        except Exception:
+            pass
+
+        # 6. 矛盾降级：每条矛盾扣 0.3
+        contradictions = fact.get("contradictions", []) or []
+        contradiction_penalty = max(0, 1.0 - len(contradictions) * 0.3)
+
+        # 7. 访问频率加分
+        access_count = fact.get("access_count", 1) or 1
+        freq_boost = 1.0 + min(math.log(access_count + 1) * 0.05, 0.2)  # 最多+0.2
+
+        # 8. 相关度加分
         relevance_boost = 1.0
         if query:
             triple_text = f"{fact.get('subject','')} {fact.get('predicate','')} {fact.get('object','')}".lower()
@@ -1247,15 +1298,55 @@ class Agent:
             matches = sum(1 for w in query_words if w in triple_text)
             if matches > 0:
                 relevance_boost = 1.0 + min(matches / max(len(query_words), 1), 0.5)
-        return base * decay * relevance_boost
+
+        return base * decay * freshness * contradiction_penalty * freq_boost * relevance_boost
+
+    def _is_blocked_memory(self, fact: dict) -> bool:
+        """检查记忆是否应被屏蔽（不进上下文）。"""
+        # 凭证类 → 屏蔽
+        if fact.get("encoding_level") == "credential" or fact.get("fact_type") == "credential":
+            return True
+        # 置信度极低 → 屏蔽
+        if fact.get("confidence", 0.5) < 0.15:
+            return True
+        # 过多矛盾 → 屏蔽
+        contradictions = fact.get("contradictions", []) or []
+        if len(contradictions) >= 3:
+            return True
+        return False
 
     def _prioritize_memories(self, facts: list[dict], query: str = "",
                                top_k: int = 8) -> list[dict]:
-        """按综合得分排序，低分记忆不注入。"""
-        scored = [(self._score_memory(f, query), f) for f in facts]
-        scored = [s for s in scored if s[0] >= 0.15]
+        """
+        记忆治理：屏蔽 + 评分排序 + 类型多样化.
+        - 先剔除 blocked 记忆（凭证、极低置信度、过多矛盾）
+        - 再按综合评分排序
+        - 确保类型多样化（同一类型不超 top_k 的 60%）
+        """
+        # Step 1: 过滤 blocked
+        filtered = [f for f in facts if not self._is_blocked_memory(f)]
+
+        # Step 2: 评分
+        scored = [(self._score_memory(f, query), f) for f in filtered]
+        scored = [s for s in scored if s[0] >= 0.1]  # 最低分阈值
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [f for _, f in scored[:top_k]]
+
+        # Step 3: 类型多样化 — 避免同一类型的记忆占满 top_k
+        result = []
+        seen_types = {}
+        max_per_type = max(1, int(top_k * 0.6))  # 单类型最多 60%
+
+        for score, fact in scored:
+            ftype = fact.get("fact_type", "observation")
+            seen_types.setdefault(ftype, 0)
+            if seen_types[ftype] >= max_per_type:
+                continue
+            result.append(fact)
+            seen_types[ftype] += 1
+            if len(result) >= top_k:
+                break
+
+        return result[:top_k]
 
     # ── ⭐ v0.16: 简化 Agent 循环核心方法 ──
 

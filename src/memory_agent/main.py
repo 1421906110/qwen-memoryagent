@@ -690,10 +690,24 @@ def _build_context(
             pass
 
     if recalled:
-        # ⭐ 重要性排序
-        recalled.sort(key=lambda f: f.get("confidence", 0.5) * f.get("importance", 0.5), reverse=True)
+        # ⭐ 记忆治理评分 + 类型多样化排序（对标 _score_memory）
+        _type_priority = {"preference": 3, "goal": 2, "fact": 2, "decision": 2, "observation": 1, "action": 0}
+        def _gov_score(f):
+            base = f.get("confidence", 0.5) * f.get("importance", 0.5)
+            tp = _type_priority.get(f.get("fact_type", "observation"), 1)
+            return base * tp
+
+        recalled = [f for f in recalled if f.get("confidence", 0.5) >= 0.2]  # 过滤极低置信度
+        recalled.sort(key=_gov_score, reverse=True)
+
+        # 类型多样化：同一类型最多2条
         lines = []
-        for f in recalled[:4]:
+        seen_types = {}
+        for f in recalled:
+            ft = f.get("fact_type", "observation")
+            seen_types.setdefault(ft, 0)
+            if seen_types[ft] >= 2:
+                continue
             s = f.get("subject", "")
             p = f.get("predicate", "")
             o = f.get("object", "")
@@ -705,6 +719,9 @@ def _build_context(
             if conf < 0.3:
                 continue
             lines.append(f"- {s}{p}{o}")
+            seen_types[ft] = seen_types.get(ft, 0) + 1
+            if len(lines) >= 4:
+                break
         if lines:
             system += "\U0001f9e0 我记得\n" + "\n".join(lines) + "\n"
 
