@@ -695,9 +695,13 @@ function showNewAgentModal() {
   document.getElementById('new-name').onkeydown = e => { if (e.key === 'Enter') createAgent(); if (e.key === 'Escape') o.remove(); };
 }
 
+let _creating = false;  // ⭐ 防止重复创建
+
 function createAgent() {
+  if (_creating) return;  // ⭐ 防重复锁
+  _creating = true;
   const name = document.getElementById('new-name').value.trim();
-  if (!name) return;
+  if (!name) { _creating = false; return; }
   const d = D();
   const aid = 'agt_' + id();
   const sid = 'ses_' + id();
@@ -710,6 +714,7 @@ function createAgent() {
   document.querySelector('.modal-overlay')?.remove();
   renderAll();
   document.getElementById('msg-input')?.focus();
+  _creating = false;
 }
 
 // ── Session ──
@@ -756,8 +761,8 @@ function _setStreaming(v) {
     _streamingTimer = setTimeout(() => {
       _streaming = false;
       document.getElementById('send-btn').disabled = false;
-      console.warn('⏰ _streaming 30s 超时自动解锁');
-    }, 30000);
+      console.warn('⏰ _streaming 15s 超时自动解锁');
+    }, 15000);
   } else {
     if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
   }
@@ -942,6 +947,67 @@ function updateTitle() {
 
 // ── Send ──
 
+// ⭐ 普通 POST 发送（streaming 降级用）
+function _postChat(r, body) {
+  fetch('/chat', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+  })
+  .then(res => {
+    if (!res.ok) throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败');
+    return res.json();
+  })
+  .then(data => {
+    const ty = document.getElementById('typing');
+    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+
+    const d2 = D();
+    const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
+    if (s2) {
+      s2.msgs.push({role: 'agent', content: data.reply, time: Date.now(), meta: 'none'});
+      S(d2);
+    }
+
+    const ad = document.createElement('div');
+    ad.className = 'msg agent';
+    let dHtml = '<div>' + esc(data.reply) + '</div>';
+    if (data.tool_sequence && data.tool_sequence.length > 0) {
+      const steps = data.tool_sequence.map(function(s) { return '🛠️ ' + esc(s); }).join('<br>');
+      dHtml = '<div style="font-size:12px;color:#666;padding:6px 10px;background:#f7f8fa;border-radius:6px;margin-bottom:8px">' + steps + '</div>' + dHtml;
+    }
+    ad.innerHTML = dHtml;
+    if (data.tools_called > 0) {
+      const m = document.createElement('span'); m.className = 'meta'; m.textContent = '🛠️ ' + data.tools_called + ' 次工具调用 🔄 ' + (data.iterations || 0) + ' 轮思考';
+      ad.appendChild(m);
+    } else if (data.new_memories_stored > 0) {
+      const m = document.createElement('span'); m.className = 'meta'; m.textContent = '📚 ' + (data.memories_used || 0) + ' 引用 🧠 +' + data.new_memories_stored;
+      ad.appendChild(m);
+    }
+    const t = document.createElement('span'); t.className = 'time'; t.textContent = fmtTime(Date.now());
+    ad.appendChild(t);
+    document.getElementById('chat-msgs').appendChild(ad);
+    scrollB();
+    document.getElementById('send-btn').disabled = false;
+    _streaming = false;
+    refreshSidebar();
+  })
+  .catch(err => {
+    _streaming = false;
+    const ty = document.getElementById('typing');
+    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+    const dX = D();
+    const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
+    if (sX) {
+      sX.msgs.push({role: 'agent', content: '⚠️ 请求失败: ' + err.message, time: Date.now()});
+      S(dX);
+    }
+    const ed = document.createElement('div');
+    ed.className = 'msg agent';
+    ed.innerHTML = '<div>❌ ' + esc(err.message) + '</div>';
+    document.getElementById('chat-msgs').appendChild(ed);
+    document.getElementById('send-btn').disabled = false;
+  });
+}
+
 function sendMsg() {
   const inp = document.getElementById('msg-input');
   const text = inp.value.trim();
@@ -1015,11 +1081,22 @@ function sendMsg() {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let fullText = '';
+    let _firstTokenTimer = null;
+    _firstTokenTimer = setTimeout(() => {
+      if (!fullText && _streaming) {
+        _streaming = false;
+        try { reader.cancel(); } catch(e) {}
+        ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+        try { ad.remove(); } catch(e) {}
+        // 首 token 超时 → 降级到普通 POST /chat
+        _postChat(r, body);
+      }
+    }, 10000);
 
     function readStream() {
       reader.read().then(({done, value}) => {
         if (done) {
-          // Stream complete
+          if (_firstTokenTimer) clearTimeout(_firstTokenTimer);
           _streaming = false;
           const d3 = D();
           const s3 = d3.agents[r.agentId]?.sessions?.[r.sessId];
