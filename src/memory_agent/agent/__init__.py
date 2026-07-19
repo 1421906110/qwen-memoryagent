@@ -366,10 +366,13 @@ class ToolRegistry:
             }
 
         if name == "web_search":
-            # 通用检查：结果列表不为空
-            results = result.get("results", []) or result.get("data", [])
-            content = result.get("content", "") or result.get("text", "")
-            if not results and not content:
+            # 实际返回用 result 或 text 或 content key
+            content = (result.get("result", "") or result.get("text", "")
+                       or result.get("content", ""))
+            if not content:
+                # 也检查 fetch 结果
+                content = result.get("fetched_page", "")
+            if not content:
                 issues.append("搜索结果为空")
             return {
                 "passed": len(issues) == 0,
@@ -875,10 +878,16 @@ class Agent:
             # Hit max iterations
             ctx.state = AgentState.DONE
             if not final_reply:
-                final_reply = (
-                    f"我已经完成了 {ctx.tools_called} 步操作。"
-                    "需要我继续处理什么吗？"
-                )
+                # ⭐ 不要声称「已完成 X 步操作」——那是在骗用户。
+                # 工具调用不一定成功，final_reply 为空说明 LLM 一直没给出有效回复。
+                tool_count = ctx.tools_called
+                if tool_count > 0:
+                    final_reply = (
+                        f"抱歉，我试了 {tool_count} 次没拿到结果。"
+                        "可能是网络问题或搜索服务暂时不可用，要不等会儿再试，或者换个说法？"
+                    )
+                else:
+                    final_reply = "抱歉，我没能正确处理你的请求。能再说一次吗？"
         # ── Step 5: ⭐ Intelligent Memory Storage ──
         self._last_ctx_tools = ctx.tools_called  # ⭐ 传给 _store_important_memories
         stored_memories = self._store_important_memories(
@@ -1437,9 +1446,10 @@ class Agent:
             return False  # 极短消息 → 简单 Q&A
         # 先检查是否有动作词（短指令如"搜索AI新闻"也需规划）
         action_indicators = [
-            "搜索", "查找", "查一下", "先查", "对比", "分析", "创建",
+            "搜索", "查找", "查一下", "先查", "查", "对比", "分析", "创建",
             "写", "写一个", "写个",
             "爬", "下载", "读取", "打开", "写入", "编辑", "安装",
+            "干", "搞", "弄", "做",
             "search", "find", "compare", "analyze", "create", "write",
             "fetch", "download", "read", "edit", "install",
         ]

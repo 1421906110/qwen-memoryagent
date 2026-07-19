@@ -2,6 +2,8 @@
 
 > **A memory system that thinks like a human brain — not just storage, but understanding, forgetting, questioning, and abstracting.**
 
+---
+
 ## What is CogniMem?
 
 CogniMem is not a chatbot with a vector database. It's a **cognitive memory system** that stores everything as structured **fact triples** (subject-predicate-object) instead of raw text. It remembers, forgets, questions contradictions, and abstracts fragments into knowledge — just like how human memory works.
