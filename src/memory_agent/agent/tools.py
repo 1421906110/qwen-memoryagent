@@ -342,6 +342,59 @@ def _parse_bing_results(html: str) -> list[str]:
     return texts[:10]
 
 
+def _parse_baidu_results(html: str) -> list[str]:
+    """从百度搜索结果 HTML 中提取标题+摘要+URL"""
+    import re
+    texts = []
+    # 百度结果容器: <div class="result c-container"> 或 <div class="c-container">
+    # 标题: <h3 class="t"> 内 <a> 的文本
+    # 摘要: <span class="content-right_..."> 或 <div class="c-abstract">
+    # URL: <a> 的 href
+
+    # 提取所有结果块
+    blocks = re.findall(
+        r'<div[^>]*class="[^"]*(?:result\s+c-container|c-container)[^"]*"[^>]*>'
+        r'(.*?)'
+        r'</div>\s*(?=<div[^>]*class="[^"]*(?:result\s+c-container|c-container)|<div[^>]*id="page")',
+        html, re.DOTALL
+    )
+    if not blocks:
+        # fallback: 更宽松的匹配
+        blocks = re.findall(
+            r'<div[^>]*class="[^"]*c-container[^"]*"[^>]*>(.*?)</div>',
+            html, re.DOTALL
+        )
+
+    for block in blocks[:10]:
+        # 标题
+        title_match = re.search(r'<h3[^>]*>.*?<a[^>]*>(.*?)</a>', block, re.DOTALL)
+        title = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else ''
+        # URL
+        url_match = re.search(r'<a[^>]*href="(https?://[^"]+)"', block)
+        url = url_match.group(1) if url_match else ''
+        # 摘要
+        abstract = ''
+        abs_match = re.search(r'<span[^>]*class="[^"]*content-right[^"]*"[^>]*>(.*?)</span>', block, re.DOTALL)
+        if not abs_match:
+            abs_match = re.search(r'<div[^>]*class="[^"]*c-abstract[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
+        if not abs_match:
+            abs_match = re.search(r'<div[^>]*class="[^"]*c-span-last[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
+        if abs_match:
+            abstract = re.sub(r'<[^>]+>', '', abs_match.group(1)).strip()
+            # 去掉末尾的 ... 和百度快照等
+            abstract = re.sub(r'[—\-]{2,}.*$', '', abstract).strip()
+
+        if title:
+            line = title
+            if url:
+                line += f' [{url}]'
+            if abstract:
+                line += f'：{abstract}'
+            texts.append(line)
+
+    return texts[:10]
+
+
 def _extract_urls(texts: list[str]) -> list[str]:
     """从搜索结果文本中提取 URL 链接"""
     import re
@@ -608,7 +661,43 @@ def tool_web_search(tool_call_id: str, args: dict,
             logger.info("新闻源提取失败: %s", e)
 
     # ===================================================================
-    #  方式 1：Bing 直搜 + 自动抓取首个结果页面
+    #  方式 1：百度搜索（中国 ECS 首选，结果质量远好于 Bing.cn）
+    # ===================================================================
+    _baidu_ok = False
+    try:
+        import httpx
+        _q_baidu = urllib.parse.quote(_enhanced_query)
+        baidu_headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        with httpx.Client(timeout=10, follow_redirects=True) as client:
+            bd_resp = client.get(f"https://www.baidu.com/s?wd={_q_baidu}&ie=utf-8&rn=10", headers=baidu_headers)
+        if bd_resp.status_code == 200:
+            bd_texts = _parse_baidu_results(bd_resp.text)
+            if bd_texts:
+                _baidu_ok = True
+                result_text = "\n".join(bd_texts)
+                urls = _extract_urls(bd_texts)
+                fetched = ""
+                if urls:
+                    fetched = _auto_fetch_first_url(urls)
+                    if fetched:
+                        logger.info("📄 百度自动抓取: %s (%d chars)", urls[0][:60], len(fetched))
+                logger.info("🔍 百度搜索成功: %d 条结果", len(bd_texts))
+                return {
+                    "result": result_text,
+                    "source": "baidu",
+                    "query": query,
+                    "fetched_page": fetched or None,
+                    "fetched_url": urls[0] if fetched else None,
+                    "_saved": _save_result(query, result_text + "\n\n" + (fetched or ""), "baidu"),
+                }
+    except Exception as e:
+        logger.info("百度搜索失败: %s", e)
+
+    # ===================================================================
+    #  方式 2：Bing 直搜（百度失败时兜底）
     # ===================================================================
     try:
         import httpx
