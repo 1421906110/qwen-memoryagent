@@ -21,7 +21,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -432,7 +432,11 @@ class Agent:
             "5. 搜到结果含URL且用户要数据 → 用 web_fetch 抓取页面拿完整数据\n"
             "6. 搜索没结果 → 换关键词再搜一次\n"
             "7. 不要模拟操作 —— 真的调工具！真的执行！\n"
-            "8. 问日期/时间/星期/几月 → 先调 shell date 再回答，不要凭记忆瞎说\n\n"
+            "8. 问日期/时间/星期/几月 → 先调 shell date 再回答，不要凭记忆瞎说\n"
+            "9. 搜索后：如实报告搜索结果，找到什么说什么。如果内容不相关或不对，"
+            "诚实说「搜索结果是XXX，不是最新的新闻」而不是「我不确定」。不要装傻。\n"
+            "10. 已经调了工具还找不到 → 告诉用户实际情况，询问是否要换方式。"
+            "不要假装完成了任务。\n\n"
             "## 🧠 记忆\n"
             "5个工具：memory_recall(回想) / memory_remember(存) / memory_status(统计)\n"
             "         / memory_diagnose(🔍自检) / memory_forget(遗忘)\n"
@@ -548,13 +552,32 @@ class Agent:
             # 超出上下文窗口导致截断或 OOM。每次迭代前检查预算。
             openai_messages = _prune_messages(openai_messages)
 
+            # ⭐ 搜索超限（最多2次）→ 移除工具，LLM 只能输出文本
+            if search_count > 2:
+                if tool_defs:
+                    logger.warning("🛑 搜索超限(%d次)，移除工具定义", search_count)
+                    openai_messages.append({
+                        "role": "user",
+                        "content": "【强制停止】你已经搜索了多次。请根据已有搜索结果回复用户，禁止继续搜索。直接给出最终答案。",
+                    })
+                tool_defs = None
+
             # Call LLM with tools
-            # ⭐ 连续错误上限：同一工具连续失败 4 次→停止，避免无限循环
+            # ⭐ 连续错误上限：同一工具连续失败 4 次→停止（web_fetch 降级）
             if hasattr(self, '_consecutive_errors') and self._consecutive_errors.get('count', 0) >= 4:
-                ctx.state = AgentState.ERROR
                 last_tool = self._consecutive_errors.get('tool', 'unknown')
-                logger.error("⛔ 连续 %d 次错误(%s)，强制停止", self._consecutive_errors['count'], last_tool)
-                return self._error_result(ctx, f"我在调用 {last_tool} 时连续出错，无法继续。请稍后再试或换个方式描述需求。")
+                if last_tool == "web_fetch":
+                    logger.warning("⛔ web_fetch 连续失败(%d次)，降级到文本回复", self._consecutive_errors['count'])
+                    tool_defs = None
+                    openai_messages.append({
+                        "role": "user",
+                        "content": "【降级】你访问的网页暂时打不开。请直接根据已有的搜索结果回复用户，告诉用户你搜索到了什么，哪些网页打不开。不要继续调工具。",
+                    })
+                    self._consecutive_errors = {'count': 0, 'tool': ''}
+                else:
+                    ctx.state = AgentState.ERROR
+                    logger.error("⛔ 连续 %d 次错误(%s)，强制停止", self._consecutive_errors['count'], last_tool)
+                    return self._error_result(ctx, f"我在调用 {last_tool} 时连续出错，无法继续。请稍后再试或换个方式描述需求。")
             try:
                 response = self.llm.chat_completion(
                     messages=openai_messages,
@@ -638,16 +661,9 @@ class Agent:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     })
 
-                    # ⭐ 搜索次数限制（防自嗨）：最多搜2次，超过就强制停止
+                    # ⭐ 搜索次数限制（防自嗨）：最多搜2次，超过禁止继续调工具
                     if tc.function.name == "web_search":
                         search_count += 1
-                        if search_count > 2:
-                            logger.warning("🛑 搜索超限(%d次)，强制停止", search_count)
-                            openai_messages.append({
-                                "role": "user",
-                                "content": "【强制停止】你已经搜索了多次。立即根据已有搜索结"
-                                           "果回复用户，禁止继续搜索。直接给出最终答案。",
-                            })
 
                     # ⭐ 连续错误追踪：同一工具连续失败计数
                     if "error" in result:
@@ -1524,6 +1540,17 @@ class Agent:
                         lessons: list[str] | None = None) -> list[dict]:
         """Build the OpenAI-format message list with system prompt + memories + goal."""
         system = self._default_system
+
+        # ⭐ 注入当前日期（避免 LLM 用训练数据的旧日期搜索）
+        _now_utc = datetime.now(timezone.utc)
+        _cst = _now_utc.astimezone(timezone(timedelta(hours=8)))
+        _date_str = _cst.strftime("%Y年%m月%d日 %A %H:%M")
+        system += (
+            "\n\n## 📅 当前日期\n"
+            f"当前日期时间是 {_date_str}（北京时间）。\n"
+            "所有搜索、时间相关的问题必须用这个日期，不要凭训练数据回答。\n"
+            '搜索时在查询中加入年份（如"2026年"）以获得最新结果。\n'
+        )
 
         # ⭐ 历史对话：作为独立消息注入 system 和 user 之间
         # 之前做法是塞进 system prompt 导致混淆（已废弃）。

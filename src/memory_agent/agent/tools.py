@@ -545,7 +545,67 @@ def tool_web_search(tool_call_id: str, args: dict,
     _enhanced_query = query
     if "双色球" in query and "开奖" not in query and "号码" not in query:
         _enhanced_query = query + " 开奖结果"
+    # ⭐ 排除低质量站点（Bing 支持 `-site:` 排除）
+    if "ai-bot.cn" not in _enhanced_query:
+        _enhanced_query += " -site:ai-bot.cn"
     encoded = urllib.parse.quote(_enhanced_query)
+
+    # ===================================================================
+    #  方式 0.5：新闻专用提取（查询含「新闻」类关键词时）
+    #  直接从国内可信来源获取 AI 新闻，绕过 Bing 低质量结果
+    # ===================================================================
+    _is_news_query = any(kw in query for kw in ["新闻", "news", "News", "最新", "热点", "动态"])
+    if _is_news_query:
+        try:
+            import httpx
+            _news_headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }
+            with httpx.Client(timeout=10, follow_redirects=True) as client:
+                # 从多个可靠新闻源提取 AI 相关内容
+                _news_sources = [
+                    "https://www.jiqizhixin.com/",
+                    "https://www.36kr.com/information/AI/",
+                    "https://www.qbitai.com/",
+                ]
+                _news_content = []
+                for _url in _news_sources:
+                    try:
+                        _resp = client.get(_url, headers=_news_headers, timeout=5)
+                        if _resp.status_code == 200:
+                            import re as _re
+                            # 取标题（h2/h3 标签）
+                            _titles = _re.findall(r'<h[23][^>]*>([^<]{10,80})</h[23]>', _resp.text)
+                            if _titles:
+                                _news_content.append(f"=== {_url} ===\n" + "\n".join(_titles[:15]))
+                    except Exception:
+                        continue
+                if _news_content:
+                    _combined = "\n\n".join(_news_content)
+                    logger.info("📰 新闻专用提取: %d 来源, %d chars", len(_news_content), len(_combined))
+                    # 也拼上 Bing 结果作为补充
+                    try:
+                        _resp2 = client.get(
+                            f"https://www.bing.com/search?q={encoded}&setlang=zh-CN",
+                            headers=_news_headers, timeout=8,
+                        )
+                        if _resp2.status_code == 200:
+                            _bing_texts = _parse_bing_results(_resp2.text)
+                            if _bing_texts:
+                                _combined += "\n\n=== Bing 补充 ===\n" + "\n".join(_bing_texts[:5])
+                    except Exception:
+                        pass
+                    return {
+                        "result": _combined,
+                        "source": "news_aggregator",
+                        "query": query,
+                        "_saved": _save_result(query, _combined, "news_agg"),
+                    }
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.info("新闻源提取失败: %s", e)
 
     # ===================================================================
     #  方式 1：Bing 直搜 + 自动抓取首个结果页面
