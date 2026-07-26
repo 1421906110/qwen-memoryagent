@@ -327,11 +327,17 @@ class LLMTripleExtractor:
 
     def _simple_rule_extract(self, text: str, source: str,
                               agent_id: str) -> list[FactTriple]:
-        """用正则模式提取简单句（0 Token，<1ms）"""
+        """用正则模式提取简单句（0 Token，<1ms）
+
+        ⭐ v0.20: 收集所有匹配，不只取第一个。
+         "我喜欢喝冰美式，住在北京朝阳区" → 2 条事实。
+        """
         text = text.strip()
+        facts = []
+        seen_keys = set()
+
         for pattern, subject, predicate, obj_group, fact_type in self.SIMPLE_PATTERNS:
-            m = re.search(pattern, text)
-            if m:
+            for m in re.finditer(pattern, text):
                 # 支持动态捕获组引用（如 r"\1" 表示第一个捕获组）
                 def _resolve(val, default=""):
                     if isinstance(val, str) and val.startswith("\\"):
@@ -347,7 +353,14 @@ class LLMTripleExtractor:
                 obj = m.group(obj_group).strip() if isinstance(obj_group, int) else _resolve(obj_group, "")
                 if not obj or len(obj) > 40:
                     continue
-                return [FactTriple(
+
+                # 去重：同一文本同一谓词同一宾语不重复存
+                key = (subj, pred, obj)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+
+                facts.append(FactTriple(
                     subject=subj,
                     predicate=pred,
                     object=obj,
@@ -363,8 +376,8 @@ class LLMTripleExtractor:
                         source=source or "simple_rule",
                         statement=text,
                     )],
-                )]
-        return []
+                ))
+        return facts
 
     # ── 规则 Fallback ──
 

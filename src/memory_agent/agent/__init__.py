@@ -1684,6 +1684,8 @@ class Agent:
         for m in openai_messages:
             if m["role"] == "assistant" and "tool_calls" in m:
                 for tc in m["tool_calls"]:
+                    if action_count >= max_actions:
+                        break
                     try:
                         if tc["function"]["name"] == "memory_remember":
                             t = json.loads(tc["function"]["arguments"]).get("text", "")
@@ -1724,13 +1726,11 @@ class Agent:
                                agent_id: str) -> list:
         """⭐ Extract structured action facts from tool calls in the conversation.
 
-        Instead of '用户 说了 完成了一个任务', this creates direct FactTriple
-        objects from actual tool calls:
-          - (小明, 创建了文件, ~/Desktop/贪吃蛇.html)
-          - (小明, 搜索了, AI 新闻)
-          - (小明, 记住了, 某条信息)
-
-        These bypass the text extractor and are immediately searchable by recall.
+        v0.20 治理规则:
+        - 重要性统一降至 0.2~0.1，不让 action 挤占用户知识排名
+        - 每轮对话最多 5 条 action fact
+        - read_file/list_dir/memory_remember/memory_recall 不再存
+        - 搜索同轮只存第 1 次
         """
         from cognimem.core.models import FactTriple, EvidenceItem
         import re as _re
@@ -1751,11 +1751,17 @@ class Agent:
 
         facts = []
         seen = set()
+        action_count = 0
+        max_actions = 5
         _search_stored = False  # ⭐ 同一轮对话只存第一次搜索
 
         for m in messages:
+            if action_count >= max_actions:
+                break
             if m["role"] == "assistant" and "tool_calls" in m:
                 for tc in m["tool_calls"]:
+                    if action_count >= max_actions:
+                        break
                     try:
                         name = tc["function"]["name"]
                         args = json.loads(tc["function"]["arguments"])
@@ -1773,8 +1779,8 @@ class Agent:
                                 object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
-                                confidence=0.9,
-                                importance=0.5,
+                                confidence=0.7,
+                                importance=0.2,
                             )
 
                     elif name == "edit_file":
@@ -1786,13 +1792,12 @@ class Agent:
                                 object=_short(path),
                                 agent_id=agent_id,
                                 fact_type="action",
-                                confidence=0.9,
-                                importance=0.5,
+                                confidence=0.7,
+                                importance=0.2,
                             )
 
                     elif name == "web_search":
                         query = args.get("query", "")
-                        # 同一轮对话只存第一次搜索（中间补搜/重试跳过）
                         if query and not _search_stored:
                             _search_stored = True
                             fact = FactTriple(
@@ -1801,8 +1806,8 @@ class Agent:
                                 object=_short(query),
                                 agent_id=agent_id,
                                 fact_type="action",
-                                confidence=0.9,
-                                importance=0.4,
+                                confidence=0.7,
+                                importance=0.15,
                             )
 
                     elif name == "web_fetch":
@@ -1822,63 +1827,28 @@ class Agent:
                                 object=_short(cmd),
                                 agent_id=agent_id,
                                 fact_type="action",
-                                confidence=0.9,
-                                importance=0.3,
+                                confidence=0.7,
+                                importance=0.1,
                             )
 
                     elif name == "memory_remember":
-                        text = args.get("text", "")
-                        if text:
-                            fact = FactTriple(
-                                subject=agent_id,
-                                predicate="记住了",
-                                object=_short(text),
-                                agent_id=agent_id,
-                                fact_type="action",
-                                confidence=0.9,
-                                importance=0.5,
-                            )
+                        # ❌ v0.20: memory_remember 存的就是用户知识,不套 action
+                        continue
 
                     elif name == "read_file":
-                        path = args.get("path", "")
-                        if path:
-                            fact = FactTriple(
-                                subject=agent_id,
-                                predicate="读取了文件",
-                                object=_short(path),
-                                agent_id=agent_id,
-                                fact_type="action",
-                                confidence=0.9,
-                                importance=0.3,
-                            )
+                        # ❌ v0.20: 低价值操作不存记忆
+                        continue
 
                     elif name == "list_dir":
-                        path = args.get("path", "")
-                        if path:
-                            fact = FactTriple(
-                                subject=agent_id,
-                                predicate="浏览了目录",
-                                object=_short(path),
-                                agent_id=agent_id,
-                                fact_type="action",
-                                confidence=0.9,
-                                importance=0.3,
-                            )
+                        # ❌ v0.20: 低价值操作不存记忆
+                        continue
 
                     elif name == "memory_recall":
-                        query = args.get("query", "")
-                        if query:
-                            fact = FactTriple(
-                                subject=agent_id,
-                                predicate="回想记忆",
-                                object=_short(query),
-                                agent_id=agent_id,
-                                fact_type="action",
-                                confidence=0.9,
-                                importance=0.4,
-                            )
+                        # ❌ v0.20: 不套 action
+                        continue
 
                     if fact:
+                        action_count += 1
                         key = fact.triple_key
                         if key not in seen:
                             seen.add(key)
@@ -2013,6 +1983,8 @@ class Agent:
         for m in openai_messages:
             if isinstance(m, dict) and m.get("role") == "assistant" and "tool_calls" in m:
                 for tc in m["tool_calls"]:
+                    if action_count >= max_actions:
+                        break
                     try:
                         if tc["function"]["name"] == "write_file":
                             args = json.loads(tc["function"]["arguments"])
