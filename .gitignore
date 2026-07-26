@@ -36,3 +36,6 @@ benchmark.py
 
 # core 引擎 — 正在使用中，不排除
 
+
+# Backup files
+*.bak
