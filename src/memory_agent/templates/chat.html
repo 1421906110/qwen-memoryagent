@@ -538,11 +538,13 @@
     body { font-size: 15px; }
     .main { width: 100%; }
 
-    .chat-hd { padding: 10px 14px; }
-    .chat-hd h1 { font-size: 14px; max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chat-hd { padding: 8px 14px; flex-wrap: wrap; gap: 4px; }
+    .chat-hd-left { min-width: 0; flex: 1; }
+    .chat-hd h1 { font-size: 14px; max-width: 50vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .chat-hd-left .brand { font-size: 11px; }
     .chat-hd-left .sep { display: none; }
-    .chat-hd-actions .nav-link { font-size: 12px; padding: 4px 6px; }
+    .chat-hd-actions { width: 100%; justify-content: flex-start; padding-top: 4px; border-top: 1px solid var(--border-light); }
+    .chat-hd-actions .nav-link { font-size: 12px; padding: 4px 8px; }
     .mobile-toggle {
       display: flex !important;
       width: 32px; height: 32px; align-items: center; justify-content: center;
@@ -564,10 +566,12 @@
     .empty-state .starter-btn { font-size: 13px; padding: 7px 16px; }
   }
   @media (max-width: 480px) {
-    .chat-hd { padding: 8px 8px; }
+    .chat-hd { padding: 6px 8px; flex-wrap: wrap; gap: 2px; }
+    .chat-hd-left { min-width: 0; flex: 1; }
     .chat-hd-left .brand { font-size: 10px; }
     .chat-hd-left .sep { display: none; }
-    .chat-hd-actions .nav-link { font-size: 11px; padding: 3px 5px; white-space: nowrap; }
+    .chat-hd-actions { width: 100%; justify-content: flex-start; padding-top: 3px; border-top: 1px solid var(--border-light); }
+    .chat-hd-actions .nav-link { font-size: 11px; padding: 3px 6px; white-space: nowrap; }
     .msg { max-width: 96%; padding: 8px 12px; font-size: 14px; }
     .chat-input { padding: 8px 10px 12px; }
     .chat-input input { font-size: 16px; padding: 10px; }
