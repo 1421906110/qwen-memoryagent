@@ -2,8 +2,9 @@
 <html lang="zh-CN" class="notranslate" translate="no">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="google" content="notranslate">
+<meta name="color-scheme" content="light dark">
 <title>MemoryAgent</title>
 <style>
   :root {
@@ -36,7 +37,37 @@
     --code-text: #e4e4e7;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --msg-agent-bg: #1e1b2e; --msg-agent-border: #2d2a4e; --code-bg: #0f0f1a; --code-text: #c4c4c7; }
+    :root {
+      --bg: #1a1b26;
+      --surface: #24253a;
+      --surface2: #2a2b40;
+      --border: #333458;
+      --border-light: #2e2f48;
+      --text: #e2e2ea;
+      --text-dim: #9d9db5;
+      --text-muted: #6b6b83;
+      --accent: #a78bfa;
+      --accent-hover: #8b5cf6;
+      --accent-soft: #a78bfa18;
+      --user-msg: #2e2f48;
+      --agent-msg: #1e1b2e;
+      --hover: rgba(255,255,255,0.06);
+      --msg-shadow: 0 1px 4px rgba(0,0,0,0.25), 0 1px 2px rgba(0,0,0,0.15);
+      --msg-agent-bg: #1e1b2e;
+      --msg-agent-border: #3d2a6e;
+      --code-bg: #0d0d1a;
+      --code-text: #c4c4c7;
+      --accent-gradient: linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%);
+    }
+    .msg.agent, .msg.agent .sender, .msg.agent .time,
+    .msg.user, .msg.user .sender, .msg.user .time,
+    .sidebar-wrap, .sidebar-overlay { color: var(--text); }
+    .sidebar-wrap { background: rgba(30,27,46,0.96); }
+    .sidebar-overlay { background: rgba(0,0,0,0.5); }
+    .msg.agent code:not(pre code) {
+      background: rgba(167,139,250,0.15);
+      color: #c4b5fd;
+    }
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -572,6 +603,9 @@
 
     .chat-msgs { padding: 8px; }
     .modal { width: 90%; max-width: 340px; padding: 20px; }
+    .sidebar-wrap { width: 85vw; min-width: 85vw; }
+    body { overflow-x: hidden; }
+    .msg.agent pre { font-size: 12px; padding: 10px; max-width: 85vw; overflow-x: auto; }
   }
   .mobile-toggle { display: none; }
 </style>
