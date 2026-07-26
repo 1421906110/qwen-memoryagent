@@ -39,27 +39,29 @@
 
   /* ── Navigation ── */
   .nav {
-    display: flex; align-items: center; gap: 16px;
-    padding: 16px 32px; background: var(--surface);
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 24px; background: var(--surface);
     border-bottom: 1px solid var(--border);
   }
-  .nav h1 { font-size: 18px; font-weight: 600; }
-  .nav h1 span { color: var(--accent); }
-  .nav .spacer { flex: 1; }
+  .nav h1 { font-size: 15px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+  .nav h1 strong { font-weight: 700; }
+  .nav .nav-sep { color: var(--border); font-size: 14px; }
+  .nav .nav-page { font-size: 14px; font-weight: 500; color: var(--text-dim); white-space: nowrap; }
+  .nav .spacer { flex: 1; min-width: 8px; }
   .nav select {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 6px 12px; font-size: 13px;
+    border-radius: 6px; padding: 4px 10px; font-size: 12px;
     outline: none; cursor: pointer;
   }
-  .nav .links { display: flex; gap: 6px; }
+  .nav .links { display: flex; gap: 3px; }
   .nav .links a {
-    color: var(--text-dim); text-decoration: none; font-size: 13px;
-    padding: 5px 12px; border-radius: 6px;
-    border: 1px solid var(--border); background: var(--surface);
-    transition: all 0.12s;
+    color: var(--text-muted); text-decoration: none; font-size: 12px;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid transparent;
+    transition: all 0.15s;
   }
-  .nav .links a:hover { border-color: var(--accent); color: var(--accent); }
-  .nav .links a.active { color: var(--accent); background: var(--surface2); border-color: var(--accent); }
+  .nav .links a:hover { background: var(--accent-soft); color: var(--accent); }
+  .nav .links a.active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
 
   /* ── Content ── */
   .container { max-width: 1200px; margin: 0 auto; padding: 24px 32px; }
@@ -67,9 +69,23 @@
   /* ── Metric Cards Row 1 ── */
   .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
   .metric {
+    position: relative;
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 20px 24px;
+    padding: 20px 24px; overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s;
   }
+  .metric:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+  }
+  .metric::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%;
+    border-radius: 3px 0 0 3px;
+  }
+  .metric:nth-child(1)::before { background: var(--accent); }
+  .metric:nth-child(2)::before { background: var(--green); }
+  .metric:nth-child(3)::before { background: var(--accent); }
+  .metric:nth-child(4)::before { background: var(--amber); }
   .metric .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
   .metric .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
   .metric .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
@@ -81,10 +97,23 @@
   /* ── Metric Cards Row 2 ── */
   .metrics2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 24px; }
   .metric2 {
+    position: relative;
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    padding: 20px 24px; cursor: pointer; transition: border-color 0.12s;
+    padding: 20px 24px; cursor: pointer; overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
   }
-  .metric2:hover { border-color: var(--accent); }
+  .metric2:hover {
+    border-color: var(--accent); transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+  }
+  .metric2::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%;
+    border-radius: 3px 0 0 3px;
+  }
+  .metric2:nth-child(1)::before { background: var(--green); }
+  .metric2:nth-child(2)::before { background: var(--accent); }
+  .metric2:nth-child(3)::before { background: var(--green); }
+  .metric2:nth-child(4)::before { background: var(--accent); }
   .metric2 .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
   .metric2 .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
   .metric2 .sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
@@ -202,13 +231,15 @@
 <body>
 
 <div class="nav">
-  <h1>🧠 <span>仪表盘</span></h1>
+  <h1>🧠 <strong>MemoryAgent</strong></h1>
+  <span class="nav-sep">/</span>
+  <span class="nav-page">仪表盘</span>
   <select id="agent-select" onchange="loadDashboard()"></select>
   <div class="spacer"></div>
   <div class="links">
     <a href="/chat">💬 聊天</a>
-    <a href="/graph">🔗 图谱</a>
     <a href="/dashboard" class="active">📊 仪表盘</a>
+    <a href="/graph">🔗 图谱</a>
   </div>
 </div>
 
@@ -348,6 +379,26 @@ const TYPES = [
 let typeChart = null;
 let growthChart = null;
 
+// ── 环形图中心文字插件 ──
+Chart.register({
+  id: 'centerText',
+  beforeDraw(chart) {
+    const { width, height, ctx } = chart;
+    ctx.save();
+    const text = chart.config.options?.plugins?.centerText?.text || '';
+    const color = chart.config.options?.plugins?.centerText?.color || '#8a8a9a';
+    if (!text) return;
+    const centerX = width / 2;
+    const centerY = height / 2 - 4;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '700 22px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.fillStyle = color;
+    ctx.fillText(text, centerX, centerY);
+    ctx.restore();
+  }
+});
+
 function renderTypeChart(counts) {
   const canvas = document.getElementById('type-chart');
   if (!canvas) return;
@@ -357,17 +408,19 @@ function renderTypeChart(counts) {
   }
   if (typeChart) typeChart.destroy();
   const data = TYPES.map(t => ({ label: t.label, count: counts[t.key] || 0, color: t.color }));
+  const total2 = data.reduce((s, d) => s + d.count, 0);
   typeChart = new Chart(ctx, {
     type: 'doughnut',
     data: {
       labels: data.map(d => d.label),
-      datasets: [{ data: data.map(d => d.count), backgroundColor: data.map(d => d.color), borderWidth: 0 }],
+      datasets: [{ data: data.map(d => d.count), backgroundColor: data.map(d => d.color), borderWidth: 0, hoverOffset: 6 }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      cutout: '70%',
+      cutout: '72%',
       plugins: {
         legend: { position: 'bottom', labels: { color: '#64748b', padding: 12, font: { size: 11 } } },
+        centerText: { text: total2 > 0 ? String(total2) : '', color: '#8b5cf6' },
       },
     },
   });
@@ -393,21 +446,28 @@ function renderGrowthChart(memories) {
   const dates = Object.keys(dateCounts).sort();
   let cum = 0;
   const values = dates.map(d => { cum += dateCounts[d]; return cum; });
+  const grad = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
+  grad.addColorStop(0, 'rgba(139,92,246,0.25)');
+  grad.addColorStop(0.5, 'rgba(139,92,246,0.08)');
+  grad.addColorStop(1, 'rgba(139,92,246,0.01)');
   growthChart = new Chart(ctx, {
     type: 'line',
     data: {
       labels: dates.map(d => d.slice(5)),
       datasets: [{
         label: '累积记忆', data: values,
-        borderColor: '#8b5cf6', backgroundColor: '#8b5cf622',
-        fill: true, tension: 0.3, pointRadius: 2,
+        borderColor: '#8b5cf6', backgroundColor: grad,
+        fill: true, tension: 0.4, pointRadius: 2,
+        pointBackgroundColor: '#8b5cf6',
+        pointHoverRadius: 4,
+        borderWidth: 2,
       }],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false } },
       scales: {
-        x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#e2e8f0' } },
+        x: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#e2e8f0', display: false } },
         y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#e2e8f0' }, beginAtZero: true },
       },
     },
@@ -558,18 +618,18 @@ async function loadDashboard() {
     const healthLabel = health.label || '—';
     const tools = health.checks?.tools || 0;
 
-    document.getElementById('m-total').textContent = total;
+    animateCount(document.getElementById('m-total'), total);
     document.getElementById('m-total-sub').textContent = `共 ${Object.keys(health.checks?.memory?.by_type || {}).length} 种类型`;
-    document.getElementById('m-concepts').textContent = concepts;
-    document.getElementById('m-creds').textContent = credentialCount;
-    document.getElementById('m-risk').textContent = contradictions;
+    animateCount(document.getElementById('m-concepts'), concepts);
+    animateCount(document.getElementById('m-creds'), credentialCount);
+    animateCount(document.getElementById('m-risk'), contradictions);
 
     const healthEl = document.getElementById('m-health');
     healthEl.textContent = healthScore >= 80 ? '✅ 健康' : healthScore >= 50 ? '⚠️ 一般' : '🔴 异常';
     healthEl.className = 'value ' + (healthScore >= 80 ? 'green' : healthScore >= 50 ? 'orange' : 'red');
     document.getElementById('m-health-sub').textContent = healthLabel.replace('✅ ','').replace('⚠️ ','').replace('🔴 ','');
 
-    document.getElementById('m-tools').textContent = tools;
+    animateCount(document.getElementById('m-tools'), tools);
 
     // ★ v0.13: STM 缓冲区 + 路由统计
     const stmCount = health.checks?.memory?.stm_buffer || 0;
@@ -604,6 +664,25 @@ async function loadDashboard() {
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── 数字计数器动画 ──
+function animateCount(el, target, suffix) {
+  if (!el) return;
+  suffix = suffix || '';
+  const duration = 800;
+  const start = performance.now();
+  const initial = 0;
+  function step(now) {
+    const pct = Math.min(1, (now - start) / duration);
+    const eased = 1 - Math.pow(1 - pct, 3); // ease-out cubic
+    const current = Math.round(initial + (target - initial) * eased);
+    el.textContent = current + suffix;
+    if (pct < 1) requestAnimationFrame(step);
+  }
+  // 如果值小于 20 且不是 0，直接用
+  if (target < 20) { el.textContent = target + suffix; return; }
+  requestAnimationFrame(step);
+}
 
 initAgentSelect();
 loadDashboard();

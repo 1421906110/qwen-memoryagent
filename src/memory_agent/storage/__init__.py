@@ -121,7 +121,7 @@ class SQLiteStore(MemoryStore):
             ),
         )
         self._conn.execute(
-            "INSERT OR IGNORE INTO memories_fts(id, content) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO memories_fts(id, content) VALUES (?, ?)",
             (memory.id, memory.content),
         )
         self._conn.commit()
@@ -199,7 +199,7 @@ class SQLiteStore(MemoryStore):
             sql = """
                 SELECT m.* FROM memories m
                 JOIN memories_fts fts ON m.id = fts.id
-                WHERE m.agent_id = ? AND memories_fts MATCH ?
+                WHERE m.agent_id = ? AND m.superseded_by IS NULL AND memories_fts MATCH ?
                 ORDER BY rank
                 LIMIT ?
             """
@@ -209,10 +209,11 @@ class SQLiteStore(MemoryStore):
             return [self._row_to_memory(r) for r in rows if r]
         except Exception:
             # Fallback: simple LIKE search
-            like = f"%{query.lower()}%"
+            like_query = sanitized if sanitized.strip() else query
+            like = f"%{like_query.lower()}%"
             sql = """
                 SELECT * FROM memories
-                WHERE agent_id = ? AND LOWER(content) LIKE ?
+                WHERE agent_id = ? AND LOWER(content) LIKE ? AND superseded_by IS NULL
                 LIMIT ?
             """
             rows = self._conn.execute(sql, (agent_id, like, limit)).fetchall()

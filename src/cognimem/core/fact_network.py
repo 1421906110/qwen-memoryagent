@@ -168,14 +168,20 @@ class FactNetwork:
 
             if contradictions:
                 # 矛盾等级: L1=deny(降双方) | L2=conflict(仅降新) | L3=context(仅标记)
+                # ⭐ 累积惩罚：多条矛盾不互相覆盖
+                _total_penalty = 0.0
+                base_conf = fact.confidence  # 新事实的初始置信度
                 for c in contradictions:
                     fact.contradictions.append(c.fact_a_id)
 
+                    existing_fact = self._get_fact(c.fact_a_id)
+                    if existing_fact:
+                        # ★ 同时更新现有事实的矛盾列表（之前漏了！）
+                        existing_fact.contradictions.append(fact.fact_id)
+
                     if c.contradiction_type == "deny":
-                        # L1: 直接否定 → 惩罚 0.2，降双方
-                        existing_fact = self._get_fact(c.fact_a_id)
-                        base_conf = existing_fact.confidence if existing_fact else self.conf_initial
-                        fact.confidence = max(base_conf - self.conf_deny_penalty, 0.1)
+                        # L1: 直接否定 → 惩罚 0.2，双方都降
+                        _total_penalty += self.conf_deny_penalty
                         if existing_fact:
                             from copy import deepcopy
                             old_ex = deepcopy(existing_fact)
@@ -191,11 +197,11 @@ class FactNetwork:
                                     f"contradicted_by_{fact.fact_id[:8]}"
                                 )
                     elif c.contradiction_type == "conflict":
-                        # L2: 间接冲突 → 以已有事实为基准降 conf，不降对方
-                        existing_fact = self._get_fact(c.fact_a_id)
-                        base_conf = existing_fact.confidence if existing_fact else self.conf_initial
-                        fact.confidence = max(base_conf - self.conf_conflict_penalty, 0.1)
+                        # L2: 间接冲突 → 惩罚 0.15，降新事实
+                        _total_penalty += self.conf_conflict_penalty
                     # L3 context: 上下文变化 → 不降置信度，仅标记
+                if _total_penalty > 0:
+                    fact.confidence = max(base_conf - _total_penalty, 0.1)
 
                     if self.db:
                         self.db.save_contradiction(c)
@@ -538,7 +544,10 @@ class FactNetwork:
                     continue
 
                 # ⭐ 新事实免疫期：创建/访问 1 小时内不衰减，给新记忆巩固时间
-                accessed = datetime.fromisoformat(fact.accessed_at)
+                try:
+                    accessed = datetime.fromisoformat(fact.accessed_at) if fact.accessed_at else now
+                except (ValueError, TypeError):
+                    accessed = now
                 if (now - accessed).total_seconds() < 3600:
                     continue
 
@@ -565,7 +574,10 @@ class FactNetwork:
                     stats["decayed"] += 1
 
                 # 低重要性 + 长期未访问 → 压缩
-                accessed = datetime.fromisoformat(fact.accessed_at)
+                try:
+                    accessed = datetime.fromisoformat(fact.accessed_at) if fact.accessed_at else now
+                except (ValueError, TypeError):
+                    accessed = now
                 days_since_access = (now - accessed).days
                 if (fact.importance < 0.3
                         and days_since_access > 14
@@ -596,7 +608,10 @@ class FactNetwork:
         - 普通: 14 天
         - 低置信 (<0.3): 7 天
         """
-        accessed = datetime.fromisoformat(fact.accessed_at)
+        try:
+            accessed = datetime.fromisoformat(fact.accessed_at) if fact.accessed_at else now
+        except (ValueError, TypeError):
+            accessed = now
         days = (now - accessed).days
         if days <= 0:
             return fact.confidence
@@ -932,11 +947,21 @@ class FactNetwork:
                 logger.debug(f"LLM categorize failed: {e}")
 
         objects = [f.object for f in group]
-        common_words = set(objects[0])
+        def _bigrams(text: str) -> set[str]:
+            """提取中文双字组 + 英文单词用于语义匹配"""
+            import re
+            grams = set()
+            for seg in re.findall(r'[一-鿿]{2,}', text):
+                for i in range(len(seg) - 1):
+                    grams.add(seg[i:i+2])
+            for w in re.findall(r'[a-zA-Z0-9_]+', text):
+                grams.add(w.lower())
+            return grams
+        common_grams = _bigrams(objects[0])
         for o in objects[1:]:
-            common_words &= set(o)
-        if common_words:
-            return "".join(sorted(common_words)[:3])
+            common_grams &= _bigrams(o)
+        if common_grams:
+            return max(common_grams, key=len)
 
         return None
 
@@ -1428,7 +1453,7 @@ class FactNetwork:
                     # ★ 一致 → 加链接 + 分享标签 + 置信度+0.02
                     if fact.fact_id not in existing.connected_facts:
                         existing.connected_facts.append(fact.fact_id)
-                    if fact.fact_id not in fact.connected_facts:
+                    if existing.fact_id not in fact.connected_facts:
                         fact.connected_facts.append(existing.fact_id)
                     # 分享标签
                     for tag in fact.context_tags:

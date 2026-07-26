@@ -74,8 +74,7 @@ MAX_INPUT_TOKENS = {
     "qwen-plus": 131072, "qwen-max": 32768,
     "qwen-max-longcontext": 1000000,
     "qwen3-6-plus": 131072, "qwen3-6-flash": 131072, "qwen3-7-max": 131072,
-    "deepseek-v4-flash": 65536, "deepseek-v4": 65536,
-    "deepseek-reasoner": 65536, "deepseek-chat": 65536,
+    "deepseek-v4-flash": 65536,
 }
 
 
@@ -135,12 +134,22 @@ def _is_retryable(e: Exception) -> bool:
 class LLMClient:
     """LLM client optimized for Chinese domestic models (Qwen / DeepSeek).
 
+    🔥 v0.17: 支持 provider:model 语法 + 运行时切换模型
+
     Key differences from standard OpenAI SDK wrapper:
     - Qwen-native features: enable_search, enable_thinking, JSON mode
     - Per-scenario temperature defaults (tool calling ≠ chat ≠ creative)
     - Built-in web search via Qwen (no need for external search tool)
     - Proper Chinese text generation parameters
     """
+
+    # 🔥 v0.17: 支持的 provider → (类名, 默认 base_url)
+    PROVIDERS = {
+        "deepseek": ("openai", "https://api.deepseek.com/v1"),
+        "qwen": ("openai", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+        "openai": ("openai", "https://api.openai.com/v1"),
+        "anthropic": ("anthropic", "https://api.anthropic.com/v1"),
+    }
 
     def __init__(
         self,
@@ -150,11 +159,8 @@ class LLMClient:
         embedding_model: str | None = None,
     ):
         self.api_key = api_key or os.getenv("QWEN_API_KEY", "")
-        self.base_url = (base_url or os.getenv("QWEN_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
-        # 仅 DeepSeek 需要去掉 /v1（原生端点没有），Qwen/百炼保留
-        if self.base_url.endswith("/v1") and "deepseek" in self.base_url.lower():
-            self.base_url = self.base_url[:-3]
-        self.model = model or os.getenv("QWEN_MODEL", DEFAULT_MODEL)
+        self.base_url = (base_url or os.getenv("QWEN_BASE_URL", "")).rstrip("/")
+        self._model_str = model or os.getenv("QWEN_MODEL", DEFAULT_MODEL)
         self.fast_model = os.getenv("QWEN_FAST_MODEL", DEFAULT_FAST_MODEL)
         self.embedding_model = embedding_model or os.getenv(
             "QWEN_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
@@ -162,8 +168,83 @@ class LLMClient:
         self.long_context_model = os.getenv("QWEN_LONG_CONTEXT_MODEL", "qwen-max-longcontext")
         self.enable_search = os.getenv("QWEN_ENABLE_SEARCH", "1") in ("1", "true", "yes")
 
-        # ── Provider detection ──
-        self._is_deepseek = "deepseek" in self.base_url.lower()
+        # 🔥 v0.17: 解析 provider:model 语法
+        self.provider = "deepseek"
+        self.model = self._model_str
+        self._parse_model_string(self._model_str)
+        self._is_deepseek = "deepseek" in (self.provider or "")
+        self._is_qwen = self.provider == "qwen"
+
+        # 🔥 v0.17: 按需构建后端 client
+        self.client = None
+        self._build_client()
+
+        # 兼容旧属性（health check 等用到）
+        self._extra_body: dict = {}
+        self._cfg = DEEPSEEK_DEFAULTS if self._is_deepseek else QWEN_DEFAULTS
+
+    def _parse_model_string(self, model_str: str):
+        """解析 'deepseek:deepseek-chat' → provider='deepseek', model='deepseek-chat'
+        裸 'gpt-5.6-sol' → provider='openai', model='gpt-5.6-sol'
+        """
+        if not model_str:
+            return
+        if ":" in model_str:
+            parts = model_str.split(":", 1)
+            candidate = parts[0].lower()
+            if candidate in self.PROVIDERS:
+                self.provider = candidate
+                self.model = parts[1]
+                return
+        # 无前缀或未知前缀 → 按 base_url 推断
+        if "dashscope" in self.base_url or "qwen" in self.base_url.lower():
+            self.provider = "qwen"
+        elif "deepseek" in self.base_url.lower():
+            self.provider = "deepseek"
+        elif "openai" in self.base_url.lower() or not self.base_url:
+            self.provider = "openai"
+        else:
+            self.provider = "deepseek"  # 默认
+        self.model = model_str
+
+    def _build_client(self):
+        """🔥 v0.17: 按需构建 provider 对应的 SDK client（不预加载全部）"""
+        provider_info = self.PROVIDERS.get(self.provider, ("openai", ""))
+        backend_type, default_base_url = provider_info
+
+        if backend_type == "anthropic":
+            try:
+                from anthropic import Anthropic
+                self.client = Anthropic(api_key=self.api_key)
+            except ImportError:
+                logger.warning("anthropic SDK not installed, falling back to OpenAI")
+                self.client = self._build_openai_client()
+        else:
+            self.client = self._build_openai_client()
+
+    def _build_openai_client(self):
+        """构建 OpenAI 兼容客户端"""
+        from openai import OpenAI
+        provider_info = self.PROVIDERS.get(self.provider, ("openai", ""))
+        _, default_base_url = provider_info
+        base = self.base_url or default_base_url
+        # DeepSeek 特殊处理
+        if "deepseek" in base.lower() and base.endswith("/v1"):
+            base = base[:-3]
+        return OpenAI(api_key=self.api_key, base_url=base)
+
+    def switch_model(self, model_str: str):
+        """🔥 v0.17: 运行时切换模型（不重启进程）
+
+        Args:
+            model_str: 如 'deepseek:deepseek-chat' 或 'qwen:qwen3-6-plus'
+        """
+        old_provider = self.provider
+        self._parse_model_string(model_str)
+        if self.provider != old_provider or self.client is None:
+            self._build_client()  # 🔥 只切换目标 provider
+        self._is_deepseek = "deepseek" in (self.provider or "")
+        logger.info("🔄 Switched model: %s/%s", self.provider, self.model)
         self._is_qwen = "dashscope" in self.base_url.lower()
         self._extra_body: dict = {}
         self._cfg = DEEPSEEK_DEFAULTS if self._is_deepseek else QWEN_DEFAULTS
@@ -286,12 +367,13 @@ class LLMClient:
             if enable_thinking:
                 extra.setdefault("thinking_budget", 1024)
 
-        # ⭐ DeepSeek: thinking 模式
+        # ⭐ DeepSeek: thinking 模式（默认开启）
         # 参考: https://api-docs.deepseek.com/api/create-chat-completion
         # 参数格式: thinking: {"type": "enabled"} + reasoning_effort
         # 注意: 开启 thinking 后 temperature/top_p 失效
-        if self._is_deepseek and enable_thinking is not None:
-            if enable_thinking:
+        if self._is_deepseek:
+            _thinking = enable_thinking if enable_thinking is not None else True
+            if _thinking:
                 extra["thinking"] = {"type": "enabled"}
                 # reasoning_effort: high=复杂任务, max=全力以赴
                 extra["reasoning_effort"] = self._cfg.get("reasoning_effort", "high")
@@ -383,6 +465,11 @@ class LLMClient:
                                                       "动态", "热点"]):
                 extra["enable_search"] = True
 
+        # ⭐ DeepSeek: 流式默认开启思考模式
+        if self._is_deepseek:
+            extra["thinking"] = {"type": "enabled"}
+            extra["reasoning_effort"] = self._cfg.get("reasoning_effort", "high")
+
         if temperature is None:
             temperature = self._cfg["temperature_chat"]
 
@@ -419,9 +506,9 @@ class LLMClient:
             delta = chunk.choices[0].delta
             if not delta:
                 continue
-            # DeepSeek: thinking 模式下的推理链（思维过程）
-            if self._is_deepseek and hasattr(delta, 'reasoning_content') and delta.reasoning_content:
-                yield delta.reasoning_content
+            # 🔥 v0.17: 源头分离 — 只 yield content，不 yield reasoning_content
+            # 之前做法是事后用 _strip_thinking_text() 正则过滤，总有漏网之鱼
+            # 现在在源头就丢弃思考内容，前端永远收不到 reasoning
             if delta.content:
                 yield delta.content
         if self._is_deepseek and total_tokens:

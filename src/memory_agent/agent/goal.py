@@ -144,6 +144,8 @@ class GoalContext:
         if current.retries >= current.max_retries:
             return False
         # Don't retry certain errors
+        if not error:
+            return True  # 无错误信息 → 默认重试
         no_retry_keywords = ["permission denied", "invalid syntax",
                              "does not exist", "no such file",
                              # ⭐ 中文 locale 错误提示

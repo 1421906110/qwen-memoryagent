@@ -28,6 +28,15 @@
     --radius: 8px;
     --radius-lg: 12px;
     --shadow: 0 1px 2px rgba(0,0,0,0.04);
+    --msg-shadow: 0 1px 4px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --msg-agent-bg: #f8f7ff;
+    --msg-agent-border: #e8e5ff;
+    --accent-gradient: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+    --code-bg: #1a1a2e;
+    --code-text: #e4e4e7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --msg-agent-bg: #1e1b2e; --msg-agent-border: #2d2a4e; --code-bg: #0f0f1a; --code-text: #c4c4c7; }
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -45,12 +54,14 @@
     min-width: var(--sidebar-width);
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    background: rgba(255,255,255,0.82);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
     border-right: 1px solid var(--border);
   }
   .sidebar {
     flex: 1;
-    background: var(--surface);
+    background: transparent;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -77,7 +88,7 @@
     background: var(--surface);
   }
   .triple-scroll {
-    max-height: 200px;
+    max-height: 120px;  /* ⭐ 缩小，给对话列表腾空间 */
     overflow-y: auto;
   }
   .triple-scroll::-webkit-scrollbar { width: 3px; }
@@ -128,10 +139,11 @@
   .agent-av {
     width: 38px; height: 38px;
     border-radius: 10px;
-    background: linear-gradient(135deg, #8b5cf6, #c084fc);
+    background: var(--accent-gradient);
     display: flex; align-items: center; justify-content: center;
     font-size: 16px;
     flex-shrink: 0;
+    box-shadow: 0 2px 6px rgba(139,92,246,0.2);
   }
   .agent-hd-info { flex: 1; min-width: 0; }
   .agent-hd-name {
@@ -146,9 +158,11 @@
     margin-top: 8px;
   }
   .agent-hd-stats .s {
-    flex: 1; text-align: center; padding: 5px 2px;
+    flex: 1; text-align: center; padding: 6px 2px;
     border-radius: 6px; background: var(--bg);
+    transition: background 0.12s;
   }
+  .agent-hd-stats .s:hover { background: var(--accent-soft); }
   .agent-hd-stats .s .n { font-size: 15px; font-weight: 700; line-height: 1.2; }
   .agent-hd-stats .s .l { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
   .n-blue { color: var(--accent); }
@@ -241,7 +255,7 @@
   .activity-emoji { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; margin-top: 1px; }
   .activity-body { flex: 1; min-width: 0; }
   .triple-item {
-    padding: 8px 12px; border-bottom: 1px solid var(--border-light); cursor: default;
+    padding: 4px 12px; border-bottom: 1px solid var(--border-light); cursor: default;
     font-size: 13px; transition: background 0.12s;
   }
   .triple-item:hover { background: var(--hover); }
@@ -249,7 +263,7 @@
   .triple-item .triple-pred { color: var(--text-dim); margin: 0 2px; }
   .triple-item .triple-obj { font-weight: 500; }
   .triple-item .triple-meta {
-    display: flex; gap: 8px; align-items: center; margin-top: 3px; font-size: 11px;
+    display: flex; gap: 8px; align-items: center; margin-top: 2px; font-size: 11px;
   }
   .triple-item .conf-bar {
     height: 4px; border-radius: 2px; background: var(--border);
@@ -299,7 +313,7 @@
 
   /* ── Agent List (bottom) ── */
   .agent-list-section {
-    max-height: 140px;
+    max-height: 85px;  /* ⭐ 最多3行（含默认agent） */
     overflow-y: auto;
   }
   .agent-list-section::-webkit-scrollbar { width: 3px; }
@@ -340,31 +354,44 @@
     display: flex; align-items: center; justify-content: space-between;
     flex-shrink: 0;
   }
-  .chat-hd-left { display: flex; align-items: center; gap: 10px; }
-  .chat-hd h1 { font-size: 15px; font-weight: 600; }
+  .chat-hd-left { display: flex; align-items: center; gap: 8px; }
+  .chat-hd-left .brand { font-size: 13px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+  .chat-hd-left .brand strong { font-weight: 700; }
+  .chat-hd-left .sep { color: var(--border); font-size: 14px; }
+  .chat-hd h1 { font-size: 14px; font-weight: 600; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chat-hd .badge {
-    font-size: 11px; padding: 2px 8px; border-radius: 4px;
-    background: var(--bg); color: var(--text-muted);
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: var(--accent-soft); color: var(--accent);
   }
-  .chat-hd-actions { display: flex; gap: 6px; }
+  .chat-hd-actions { display: flex; gap: 3px; }
   .chat-hd-actions button, .nav-link {
-    padding: 5px 12px; border-radius: var(--radius);
-    border: 1px solid var(--border); background: var(--surface);
-    color: var(--text-dim); font-size: 12px; cursor: pointer;
-    text-decoration: none; transition: all 0.12s;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid transparent; background: transparent;
+    color: var(--text-muted); font-size: 12px; cursor: pointer;
+    text-decoration: none; transition: all 0.15s;
+    white-space: nowrap;
   }
   .chat-hd-actions button:hover, .nav-link:hover {
-    border-color: var(--accent); color: var(--accent);
+    background: var(--accent-soft); color: var(--accent);
+  }
+  .nav-link.active {
+    background: var(--accent-soft); color: var(--accent);
+    border-color: var(--accent);
   }
 
   .chat-msgs {
-    flex: 1; overflow-y: auto; padding: 16px 20px;
-    display: flex; flex-direction: column; gap: 12px;
+    flex: 1; overflow-y: auto; padding: 20px 24px;
+    display: flex; flex-direction: column; gap: 16px;
+    background: radial-gradient(ellipse at 50% 0%, rgba(139,92,246,0.03) 0%, transparent 60%);
   }
   .chat-msgs::-webkit-scrollbar { width: 4px; }
   .chat-msgs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-  .msg { max-width: 80%; padding: 10px 16px; border-radius: 12px; line-height: 1.5; font-size: 14px; position: relative; }
+  @keyframes msgIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .msg { max-width: 80%; padding: 10px 16px; border-radius: 12px; line-height: 1.5; font-size: 14px; position: relative; animation: msgIn 0.3s ease; }
   .msg p { margin: 0 0 8px 0; }
   .msg p:last-child { margin-bottom: 0; }
   .msg br { display: inline; }
@@ -375,15 +402,19 @@
   .msg.user {
     align-self: flex-end; background: #ffffff;
     border: 1px solid var(--border); border-bottom-right-radius: 4px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    border-left: 3px solid var(--accent);
+    box-shadow: var(--msg-shadow);
   }
   .msg.user .sender { color: #a78bfa; text-align: right; }
+  .msg.user .time { color: var(--text-muted); }
+  .msg.user .meta { background: var(--bg); }
   .msg.agent {
-    align-self: flex-start; background: #ffffff;
-    border: 1px solid var(--border); border-bottom-left-radius: 4px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    align-self: flex-start; background: var(--msg-agent-bg);
+    border: 1px solid var(--msg-agent-border); border-bottom-left-radius: 4px;
+    border-left: 3px solid var(--accent);
+    box-shadow: var(--msg-shadow);
   }
-  .msg.agent .sender { color: #a78bfa; }
+  .msg.agent .sender { color: var(--accent); }
   .msg.agent.streaming::after {
     content: '▊'; animation: blink 0.9s step-end infinite; margin-left: 2px; color: var(--accent);
   }
@@ -398,17 +429,63 @@
     margin-top: 6px; padding: 2px 8px; border-radius: 4px;
     background: rgba(255,255,255,0.04);
   }
+  /* 代码块 — One Dark Pro 风格 */
+  .msg.agent pre {
+    background: #1e1e2e; color: #cdd6f4;
+    border-radius: 8px; padding: 12px 14px; margin: 8px 0;
+    overflow-x: auto; font-size: 13px;
+    line-height: 1.5; border: 1px solid rgba(255,255,255,0.06);
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+  }
+  .msg.agent code {
+    font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 0.9em;
+  }
+  .msg.agent pre code { font-size: 13px; background: transparent; padding: 0; border: none; }
+  .msg.agent :not(pre) > code {
+    background: rgba(139,92,246,0.12); color: var(--accent);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.85em;
+  }
 
-  .typing { align-self: flex-start; display: flex; gap: 4px; padding: 16px 20px; }
-  .typing span { width: 7px; height: 7px; background: var(--text-dim); border-radius: 50%; animation: pulse 1.4s infinite ease-in-out; }
-  .typing span:nth-child(2) { animation-delay: 0.2s; }
-  .typing span:nth-child(3) { animation-delay: 0.4s; }
-  @keyframes pulse { 0%,80%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+  .typing { align-self: flex-start; display: flex; align-items: center; gap: 10px; padding: 12px 20px; }
+  .typing canvas { width: 40px; height: 40px; flex-shrink: 0; }
+  .typing .orb-label { font-size: 13px; color: var(--text-dim); white-space: nowrap; }
 
-  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text-dim); gap: 8px; }
-  .empty-state .icon { font-size: 40px; }
-  .empty-state p { font-size: 13px; }
-  .empty-state .hint { font-size: 12px; color: var(--text-muted); }
+  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+  @keyframes brainPulse {
+    0%,100% { transform: scale(1) translateY(0); opacity: 0.7; }
+    50% { transform: scale(1.1) translateY(-6px); opacity: 1; }
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text-dim); gap: 6px; user-select: none;
+    padding: 20px; animation: fadeUp 0.6s ease;
+  }
+  .empty-state .empty-brain {
+    font-size: 56px; animation: brainPulse 3s ease-in-out infinite;
+    margin-bottom: 8px; filter: drop-shadow(0 4px 12px rgba(139,92,246,0.2));
+  }
+  .empty-state .empty-title { font-size: 15px; font-weight: 500; color: var(--text); }
+  .empty-state .empty-hint { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+  .empty-state .empty-starters { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .empty-state .starter-btn {
+    padding: 8px 18px; border-radius: 20px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text-dim); font-size: 13px;
+    cursor: pointer; transition: all 0.2s;
+    animation: fadeUp 0.4s ease backwards;
+  }
+  .empty-state .starter-btn:nth-child(1) { animation-delay: 0.1s; }
+  .empty-state .starter-btn:nth-child(2) { animation-delay: 0.2s; }
+  .empty-state .starter-btn:nth-child(3) { animation-delay: 0.3s; }
+  .empty-state .starter-btn:hover {
+    border-color: var(--accent); color: var(--accent);
+    background: var(--accent-soft); transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(139,92,246,0.12);
+  }
 
   .chat-input { padding: 12px 20px 16px; border-top: 1px solid var(--border-light); flex-shrink: 0; }
   .input-row {
@@ -417,12 +494,12 @@
     border-radius: 12px; padding: 4px;
     transition: border-color 0.15s;
   }
-  .input-row:focus-within { border-color: var(--accent); }
+  .input-row:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139,92,246,0.12); }
   .chat-input input { flex: 1; padding: 10px 12px; border: none; background: transparent; color: var(--text); font-size: 14px; outline: none; }
   .chat-input input::placeholder { color: var(--text-muted); }
-  .chat-input button { padding: 8px 18px; border-radius: 8px; border: none; background: var(--accent); color: white; font-size: 13px; cursor: pointer; transition: background 0.12s; white-space: nowrap; }
-  .chat-input button:hover { background: var(--accent-hover); }
-  .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .chat-input button { padding: 8px 20px; border-radius: 8px; border: none; background: var(--accent); color: white; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+  .chat-input button:hover { filter: brightness(1.1); transform: translateY(-1px); box-shadow: 0 2px 8px rgba(139,92,246,0.3); }
+  .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; transform: none; box-shadow: none; }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
   .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 360px; }
@@ -444,8 +521,11 @@
       width: 280px;
       min-width: 280px;
       transform: translateX(-110%);
-      transition: transform 0.25s ease;
-      box-shadow: 2px 0 16px rgba(0,0,0,0.15);
+      transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+      box-shadow: 4px 0 24px rgba(0,0,0,0.12);
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
     }
     .sidebar-wrap.open { transform: translateX(0); }
     .sidebar-overlay {
@@ -477,9 +557,10 @@
     .msg { max-width: 92%; padding: 10px 14px; }
     .msg .sender { font-size: 11px; }
 
-    .empty-state .icon { font-size: 40px; }
-    .empty-state p { font-size: 14px; }
-    .empty-state .hint { font-size: 12px; }
+    .empty-state .empty-brain { font-size: 44px; }
+    .empty-state .empty-title { font-size: 14px; }
+    .empty-state .empty-hint { font-size: 12px; }
+    .empty-state .starter-btn { font-size: 13px; padding: 7px 16px; }
   }
   @media (max-width: 480px) {
     .chat-hd { padding: 8px 10px; }
@@ -532,7 +613,6 @@
       <div class="activity-hd">
         <span>🔗 三元组</span>
         <span onclick="consolidateNow()" style="font-size:10px;padding:2px 8px;border:1px solid var(--accent);color:var(--accent);background:transparent;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;gap:2px;white-space:nowrap;line-height:1.4" title="归纳整理：从碎片中抽象概念 + 去重 + 遗忘衰减">🧠 归纳</span>
-        <span onclick="clearAllMemories()" style="font-size:10px;padding:2px 8px;border:1px solid var(--red);color:var(--red);background:transparent;border-radius:4px;cursor:pointer;display:inline-flex;align-items:center;gap:2px;white-space:nowrap;line-height:1.4" title="清除当前 Agent 所有记忆（不可恢复）">🗑️ 清空</span>
         <button onclick="refreshTriples();this.classList.remove('spin');void this.offsetWidth;this.classList.add('spin')" title="刷新">↻</button>
       </div>
       <div class="triple-scroll"><div id="triple-list"></div></div>
@@ -567,24 +647,42 @@
   <div class="chat-hd">
     <div class="chat-hd-left">
       <button class="mobile-toggle" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+      <span class="brand">🧠 <strong>MemoryAgent</strong></span>
+      <span class="sep">/</span>
       <h1 id="chat-title">新对话</h1>
       <span class="badge" id="session-badge"></span>
     </div>
-    <div class="chat-hd-actions" style="display:flex;gap:4px">
-      <a href="/dashboard" target="_blank" class="nav-link">📊 仪表盘</a>
-      <a href="/graph" target="_blank" class="nav-link">🔗 图谱</a>
+    <div class="chat-hd-actions">
+      <a href="/chat" class="nav-link active">💬 聊天</a>
+      <a href="/dashboard" class="nav-link">📊 仪表盘</a>
+      <a href="/graph" class="nav-link">🔗 图谱</a>
     </div>
   </div>
 
   <div class="chat-msgs" id="chat-msgs">
     <div class="empty-state" id="empty-state">
-      <div class="icon">🧠</div>
-      <p>每次对话都在训练 Agent 的记忆</p>
-      <p class="hint">知识会积累 · 偏好会学习 · 记忆会衰减也会被强化</p>
+      <div class="empty-brain">🧠</div>
+      <p class="empty-title">每次对话都在训练 Agent 的记忆</p>
+      <p class="empty-hint">知识会积累 · 偏好会学习 · 记忆会衰减也会被强化</p>
+      <div class="empty-starters">
+        <button class="starter-btn" onclick="sendStarter('今天天气怎么样？')">🌤️ 今天天气怎么样？</button>
+        <button class="starter-btn" onclick="sendStarter('帮我整理这些笔记')">📝 帮我整理笔记</button>
+        <button class="starter-btn" onclick="sendStarter('记录一个想法')">💡 记录一个想法</button>
+      </div>
     </div>
   </div>
 
   <div class="chat-input">
+    <!-- 🔥 v0.17: 模型切换 -->
+    <div style="display:flex;gap:6px;padding:0 0 6px 0;align-items:center">
+      <select id="model-select" style="font-size:11px;padding:3px 6px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);outline:none;cursor:pointer">
+        <option value="deepseek:deepseek-chat">DeepSeek V4</option>
+        <option value="deepseek:deepseek-reasoner">DeepSeek Reasoner</option>
+        <option value="qwen:qwen3-6-plus">Qwen 3-6-Plus</option>
+        <option value="gpt-5.6-sol">GPT 5.6 SOL</option>
+      </select>
+      <span style="font-size:10px;color:var(--text-muted);cursor:pointer" onclick="document.getElementById('model-select').style.display=document.getElementById('model-select').style.display==='none'?'':'none'">⚙</span>
+    </div>
     <div class="input-row">
       <input type="text" id="msg-input" placeholder="给 Agent 发消息…" autofocus
              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}">
@@ -594,7 +692,8 @@
 </div>
 
 <div id="typing" class="typing" style="display:none">
-  <span></span><span></span><span></span>
+  <canvas id="orb-canvas" width="96" height="96"></canvas>
+  <span class="orb-label" id="orb-label">思考中…</span>
 </div>
 
 <!-- 事实详情弹窗 -->
@@ -700,20 +799,23 @@ let _creating = false;  // ⭐ 防止重复创建
 function createAgent() {
   if (_creating) return;  // ⭐ 防重复锁
   _creating = true;
-  const name = document.getElementById('new-name').value.trim();
-  if (!name) { _creating = false; return; }
-  const d = D();
-  const aid = 'agt_' + id();
-  const sid = 'ses_' + id();
-  d.agents[aid] = { name, created: Date.now(), sessions: {} };
-  // ⭐ 自动创建一个空会话，避免第一枪在 sendMsg 里临时创建造成竞态
-  d.agents[aid].sessions[sid] = { title: '新对话', created: Date.now(), msgs: [] };
-  d.activeAgent = aid;
-  d.activeSession = sid;
-  S(d);
-  document.querySelector('.modal-overlay')?.remove();
-  renderAll();
-  document.getElementById('msg-input')?.focus();
+  try {
+    const name = document.getElementById('new-name').value.trim();
+    if (!name) { _creating = false; return; }
+    const d = D();
+    const aid = 'agt_' + id();
+    const sid = 'ses_' + id();
+    d.agents[aid] = { name, created: Date.now(), sessions: {} };
+    // ⭐ 自动创建一个空会话，避免第一枪在 sendMsg 里临时创建造成竞态
+    d.agents[aid].sessions[sid] = { title: '新对话', created: Date.now(), msgs: [] };
+    d.activeAgent = aid;
+    d.activeSession = sid;
+    S(d);
+    renderAll();
+    document.getElementById('msg-input')?.focus();
+  } catch(e) { console.error('createAgent error:', e); }
+  // ⭐ 无论是否异常，都要关弹窗+解锁
+  document.querySelectorAll('.modal-overlay').forEach(el => el.remove());
   _creating = false;
 }
 
@@ -753,16 +855,23 @@ function newChat() {
 let _streaming = false;
 let _streamingTimer = null;
 
+// 🔥 v0.17: 统一隐藏 typing + 停止 orb
+function _hideTyping() {
+  const ty = document.getElementById('typing');
+  if (ty) { ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty); }
+  if (_orb) _orb.stop();
+}
+
 function _setStreaming(v) {
   _streaming = v;
   if (v) {
-    // ⭐ 30 秒强制解锁：防止 _streaming 卡死
+    // ⭐ 120 秒强制解锁：防止 _streaming 卡死（DeepSeek 搜索+思考可能 >30s）
     if (_streamingTimer) clearTimeout(_streamingTimer);
     _streamingTimer = setTimeout(() => {
       _streaming = false;
       document.getElementById('send-btn').disabled = false;
-      console.warn('⏰ _streaming 15s 超时自动解锁');
-    }, 15000);
+      console.warn('⏰ _streaming 120s 超时自动解锁');
+    }, 120000);
   } else {
     if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
   }
@@ -886,7 +995,7 @@ function renderAgentList() {
       <div class="agent-li-icon">🧠</div>
       <div class="agent-li-name">${esc(a.name)}</div>
       <div class="agent-li-count">${Object.keys(a.sessions||{}).length}</div>
-      <span class="agent-li-del" onclick="event.stopPropagation();deleteAgent('${id}','${esc(a.name)}')" title="删除此项目及全部记忆">🗑️</span>
+      <span class="agent-li-del" onclick="event.stopPropagation();deleteAgent('${id}',${jesc(a.name)})" title="移除项目">🗑️</span>
     </div>`
   ).join('');
 }
@@ -958,7 +1067,7 @@ function _postChat(r, body) {
   })
   .then(data => {
     const ty = document.getElementById('typing');
-    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+    _hideTyping();
 
     const d2 = D();
     const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
@@ -993,7 +1102,7 @@ function _postChat(r, body) {
   .catch(err => {
     _streaming = false;
     const ty = document.getElementById('typing');
-    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+    _hideTyping();
     const dX = D();
     const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
     if (sX) {
@@ -1054,6 +1163,7 @@ function sendMsg() {
   const ty = document.getElementById('typing');
   ty.style.display = 'flex';
   document.getElementById('chat-msgs').appendChild(ty);
+  if (_orb) _orb.start('working');
   scrollB();
 
   // 传全部历史消息（后端自己控制保留多少条）
@@ -1069,7 +1179,7 @@ function sendMsg() {
     if (!res.ok) { _streaming = false; throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败'); }
 
     // Remove typing indicator, create streaming message element
-    ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+    _hideTyping();
 
     const ad = document.createElement('div');
     ad.className = 'msg agent streaming';
@@ -1086,18 +1196,27 @@ function sendMsg() {
       if (!fullText && _streaming) {
         _streaming = false;
         try { reader.cancel(); } catch(e) {}
-        ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+        _hideTyping();
         try { ad.remove(); } catch(e) {}
+        if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
         // 首 token 超时 → 降级到普通 POST /chat
+        // ⭐ 25s 窗口：容纳后端 15s keepalive 间隔 + 缓冲
         _postChat(r, body);
       }
-    }, 10000);
+    }, 25000);
 
     function readStream() {
       reader.read().then(({done, value}) => {
         if (done) {
           if (_firstTokenTimer) clearTimeout(_firstTokenTimer);
           _streaming = false;
+          // ⭐ 空响应保护：stream 完成但没内容 → 降级到 POST
+          if (!fullText.trim()) {
+            try { ad.remove(); } catch(e) {}
+            if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
+            _postChat(r, body);
+            return;
+          }
           const d3 = D();
           const s3 = d3.agents[r.agentId]?.sessions?.[r.sessId];
           if (s3) {
@@ -1120,11 +1239,40 @@ function sendMsg() {
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
+              // ⭐ 收到任何事件都重置首 token 超时计时器（25s 匹配后端 keepalive 间隔）
+              if (_firstTokenTimer) { clearTimeout(_firstTokenTimer); }
+              _firstTokenTimer = setTimeout(() => {
+                if (!fullText && _streaming) {
+                  _streaming = false;
+                  try { reader.cancel(); } catch(e) {}
+                  _hideTyping();
+                  try { ad.remove(); } catch(e) {}
+                  if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
+                  _postChat(r, body);
+                }
+              }, 25000);
               if (data.type === 'token') {
                 fullText += data.content;
                 const cd = ad.querySelector('.stream-content');
                 if (cd) cd.textContent = fullText; else ad.textContent = fullText;
                 scrollB();
+              } else if (data.type === 'narration' || data.type === 'orb_state') {
+                // 🔥 v0.17: narration 更新 orb 状态
+                const text = data.content || '';
+                if (_orb) {
+                  const orbState = data.type === 'orb_state' ? text : _narrationToOrbState(text);
+                  if (orbState) _orb.start(orbState);
+                }
+                // also update label in the <streaming> typing area
+                const orbLabel = document.getElementById('orb-label');
+                if (orbLabel && data.type === 'narration') orbLabel.textContent = text;
+              } else if (data.type === 'meta') {
+                // 元数据展示（工具调用数等）
+                const cd = ad.querySelector('.stream-content') || ad;
+                const metaEl = document.createElement('div');
+                metaEl.className = 'meta';
+                metaEl.textContent = data.content;
+                cd.parentNode.appendChild(metaEl);
               } else if (data.type === 'error') {
                 const cd = ad.querySelector('.stream-content') || ad;
                 cd.textContent = '❌ ' + data.content;
@@ -1150,6 +1298,8 @@ function sendMsg() {
   })
   .catch(() => {
     _streaming = false;
+    // Remove the empty streaming div if it was created (avoids blank bubbles)
+    try { ad.remove(); } catch(e) {}
     // Streaming failed — fall back to regular POST /chat
     fetch('/chat', {
       method: 'POST',
@@ -1162,7 +1312,7 @@ function sendMsg() {
     })
     .then(data => {
       _streaming = false;
-      ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+      _hideTyping();
 
       const d2 = D();
       const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
@@ -1201,7 +1351,7 @@ function sendMsg() {
     })
     .catch(err => {
       _streaming = false;
-      ty.style.display = 'none'; if (ty.parentNode) ty.parentNode.removeChild(ty); document.querySelector('.chat-input')?.before(ty);
+      _hideTyping();
       // 保存错误到对话历史，保证下一轮能看到
       const dX = D();
       const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
@@ -1387,6 +1537,8 @@ function closeFactModal() {
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+// ⭐ 安全内插到 JS 字符串字面量（onclick 属性）
+function jesc(s) { return "'" + String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/</g, '\\x3C').replace(/>/g, '\\x3E') + "'"; }
 
 // Simple markdown rendering for AI responses
 // Splits into paragraphs, applies inline formatting, wraps each block.
@@ -1452,25 +1604,7 @@ function md(s) {
   return out.join('');
 }
 
-// ── 整合 / 清空 / 删除 Agent ──
-
-async function clearAllMemories() {
-  const span = event.target;
-  const st = getState();
-  const aid = st ? st.agentId : 'default';
-  if (!confirm(`确定要清除 ${aid} 的所有记忆吗？\\n此操作不可恢复！`)) return;
-  span.style.opacity = '0.5'; span.style.pointerEvents = 'none'; span.textContent = '⏳';
-  try {
-    const resp = await fetch('/clear?agent_id=' + encodeURIComponent(aid), {method:'DELETE'});
-    const data = await resp.json();
-    span.textContent = '✅ 已清空 ' + (data.deleted || 0) + ' 条';
-    setTimeout(() => { span.textContent = '🗑️ 清空'; span.style.opacity = '1'; span.style.pointerEvents = 'auto'; }, 2000);
-    refreshSidebar();
-  } catch(e) {
-    span.textContent = '❌';
-    setTimeout(() => { span.textContent = '🗑️ 清空'; span.style.opacity = '1'; span.style.pointerEvents = 'auto'; }, 2000);
-  }
-}
+// ── 整合 / 移除 Agent ──
 
 async function consolidateNow() {
   const btn = event.target;
@@ -1479,7 +1613,8 @@ async function consolidateNow() {
   btn.style.pointerEvents = 'none';
   btn.textContent = '⏳';
   try {
-    const r = await fetch('/consolidate?agent_id=default', {method:'POST'});
+    const aid_c = D().activeAgent || 'default';
+    const r = await fetch('/consolidate?agent_id=' + encodeURIComponent(aid_c), {method:'POST'});
     const d = await r.json();
     btn.textContent = '✅';
     setTimeout(() => { btn.textContent = '🧠 归纳整理'; btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }, 2000);
@@ -1491,8 +1626,7 @@ async function consolidateNow() {
 }
 
 async function deleteAgent(id, name) {
-  if (!confirm(`确定删除项目「${name}」及其全部记忆吗？\\n此操作不可恢复！`)) return;
-  try { await fetch('/clear?agent_id=' + encodeURIComponent(id), {method:'DELETE'}); } catch(e) {}
+  if (!confirm(`确定移除项目「${name}」？`)) return;
   const d = D();
   delete d.agents[id];
   if (d.activeAgent === id) {
@@ -1504,7 +1638,354 @@ async function deleteAgent(id, name) {
   renderAll();
 }
 
-// ── Init ──
+// ════════════════════════════════════════════════════════════
+//  🔥 v0.18: CogniOrb 2.0 — 对标 thinking-orbs ⭐1,032
+//  6 种状态，每状态独立色系 + glow 光晕 + 过渡 morph 动画
+//  96px@2x Canvas，自动暗色/亮色模式，离屏暂停
+// ════════════════════════════════════════════════════════════
+
+const STATE_COLORS = {
+  working:   { p: '#8b5cf6', g: 'rgba(139,92,246,0.15)', d: 'rgba(139,92,246,0.35)' },
+  searching: { p: '#3b82f6', g: 'rgba(59,130,246,0.15)', d: 'rgba(59,130,246,0.35)' },
+  solving:   { p: '#10b981', g: 'rgba(16,185,129,0.15)', d: 'rgba(16,185,129,0.35)' },
+  listening: { p: '#06b6d4', g: 'rgba(6,182,212,0.15)', d: 'rgba(6,182,212,0.35)' },
+  composing: { p: '#f59e0b', g: 'rgba(245,158,11,0.15)', d: 'rgba(245,158,11,0.35)' },
+  shaping:   { p: '#ec4899', g: 'rgba(236,72,153,0.15)', d: 'rgba(236,72,153,0.35)' },
+};
+
+class CogniOrb {
+  constructor(canvasId, labelId) {
+    this.canvas = document.getElementById(canvasId);
+    this.label = document.getElementById(labelId);
+    this.ctx = this.canvas.getContext('2d');
+    this.size = 72;
+    // 状态
+    this.state = 'working';
+    this._prevState = null;
+    this._transitionT = 0;    // 0→1 morph 进度
+    this._morphing = false;
+    this.frameId = null;
+    this.time = 0;
+    this.paused = false;
+    this._themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+
+    // 离屏自动暂停
+    this._observer = new IntersectionObserver(([e]) => {
+      this.paused = !e.isIntersecting;
+      if (!this.paused && !this.frameId && this._running) this._animate();
+    }, { threshold: 0 });
+    this._observer.observe(this.canvas);
+    document.addEventListener('visibilitychange', () => {
+      this.paused = document.hidden;
+      if (!this.paused && !this.frameId && this._running) this._animate();
+    });
+
+    this._running = false;
+  }
+
+  // ── 状态颜色 ──
+  _sc() { return STATE_COLORS[this.state] || STATE_COLORS.working; }
+  _scPrev() { return STATE_COLORS[this._prevState] || STATE_COLORS.working; }
+  _blend(a, b, t) {
+    if (!b) return a;
+    const lerp = (x, y) => x.map((v, i) => Math.round(v + (y[i] - v) * t));
+    const pa = a.match(/rgba?\((\d+),(\d+),(\d+)(?:,([\d.]+))?\)/);
+    const pb = b.match(/rgba?\((\d+),(\d+),(\d+)(?:,([\d.]+))?\)/);
+    if (!pa || !pb) return t < 0.5 ? a : b;
+    const ca = [parseInt(pa[1]), parseInt(pa[2]), parseInt(pa[3]), parseFloat(pa[4]||'1')];
+    const cb = [parseInt(pb[1]), parseInt(pb[2]), parseInt(pb[3]), parseFloat(pb[4]||'1')];
+    const cm = lerp(ca, cb);
+    return `rgba(${cm[0]},${cm[1]},${cm[2]},${cm[3]})`;
+  }
+  _col(alpha) {
+    const c = this._sc();
+    const base = this._isDark() ? `rgba(220,220,240,${alpha||0.85})` : c.p;
+    if (!this._morphing || !this._prevState) return this._isDark() ? base : `rgba(${parseInt(c.p.slice(1,3),16)},${parseInt(c.p.slice(3,5),16)},${parseInt(c.p.slice(5,7),16)},${alpha||0.8})`;
+    const prev = this._scPrev();
+    const t = this._transitionT;
+    const r = Math.round(parseInt(c.p.slice(1,3),16)*t + parseInt(prev.p.slice(1,3),16)*(1-t));
+    const g = Math.round(parseInt(c.p.slice(3,5),16)*t + parseInt(prev.p.slice(3,5),16)*(1-t));
+    const b = Math.round(parseInt(c.p.slice(5,7),16)*t + parseInt(prev.p.slice(5,7),16)*(1-t));
+    return `rgba(${r},${g},${b},${alpha||0.8})`;
+  }
+  _colDim(alpha) {
+    const c = this._sc();
+    if (this._isDark()) return `rgba(180,180,200,${alpha||0.3})`;
+    if (!this._morphing || !this._prevState) return `rgba(${parseInt(c.p.slice(1,3),16)},${parseInt(c.p.slice(3,5),16)},${parseInt(c.p.slice(5,7),16)},${alpha||0.35})`;
+    const prev = this._scPrev();
+    const t = this._transitionT;
+    const r = Math.round(parseInt(c.p.slice(1,3),16)*t + parseInt(prev.p.slice(1,3),16)*(1-t));
+    const g = Math.round(parseInt(c.p.slice(3,5),16)*t + parseInt(prev.p.slice(3,5),16)*(1-t));
+    const b = Math.round(parseInt(c.p.slice(5,7),16)*t + parseInt(prev.p.slice(5,7),16)*(1-t));
+    return `rgba(${r},${g},${b},${alpha||0.35})`;
+  }
+
+  // ── 状态文本映射 ──
+  _stateLabel(s) {
+    const m = {
+      working: '处理中…', searching: '搜索中…', solving: '分析中…',
+      listening: '等待输入…', composing: '生成中…', shaping: '构思中…',
+    };
+    return m[s] || '思考中…';
+  }
+
+  // ── 启动/切换状态 ──
+  start(state) {
+    if (state && state !== this.state) {
+      // 记录上一状态，启动 morph 过渡
+      this._prevState = this.state;
+      this.state = state;
+      this._transitionT = 0;
+      this._morphing = true;
+      if (this.label) this.label.textContent = this._stateLabel(state);
+    }
+    this._running = true;
+    if (this._morphing) this.time = 0;  // 保持动画连续
+    else this.time = 0;
+    if (!this.paused && !this.frameId) this._animate();
+  }
+
+  stop() {
+    this._running = false;
+    this._morphing = false;
+    this._prevState = null;
+    if (this.frameId) { cancelAnimationFrame(this.frameId); this.frameId = null; }
+    this.ctx.clearRect(0, 0, this.size, this.size);
+  }
+
+  // ── 光晕绘制（每帧先画） ──
+  _drawGlow(t) {
+    const c = this._sc();
+    const cx = this.size/2, cy = this.size/2;
+    const pulse = 0.85 + 0.15 * Math.sin(t * 0.04);
+    const r = 22 * pulse;
+    const grad = this.ctx.createRadialGradient(cx, cy, 2, cx, cy, r);
+    const col = this._morphing && this._prevState
+      ? this._blend(this._scPrev().g, c.g, this._transitionT)
+      : c.g;
+    grad.addColorStop(0, col);
+    grad.addColorStop(1, 'transparent');
+    this.ctx.fillStyle = grad;
+    this.ctx.beginPath();
+    this.ctx.arc(cx, cy, r, 0, Math.PI*2);
+    this.ctx.fill();
+  }
+
+  // ── 动画循环 ──
+  _animate() {
+    if (this.paused || !this._running) { this.frameId = null; return; }
+    this.time += 1;
+    // morph 过渡：30 帧完成
+    if (this._morphing) {
+      this._transitionT = Math.min(1, this._transitionT + 0.05);
+      if (this._transitionT >= 1) { this._morphing = false; this._prevState = null; }
+    }
+    this.ctx.clearRect(0, 0, this.size, this.size);
+    this._drawGlow(this.time);
+    this[`_draw_${this.state}`](this.time);
+    this.frameId = requestAnimationFrame(() => this._animate());
+  }
+
+  // ── 6 种状态绘制（均已升级颜色+光晕） ──
+
+  // working: 粒子沿倾斜轨道旋转（紫色）
+  _draw_working(t) {
+    const cx = 36, cy = 36;
+    const count = 8;
+    const col = this._col(), colD = this._colDim();
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + t * 0.03;
+      const tilt = 0.4;
+      const rx = 20, ry = 8;
+      const x = cx + Math.cos(angle) * rx;
+      const y = cy + Math.sin(angle) * ry + Math.cos(angle * 2) * tilt * ry;
+      const alpha = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(angle - t * 0.05));
+      this._dot(x, y, 3 + 2 * alpha, this._col(0.5 + 0.4 * alpha));
+    }
+    // 轨道
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
+      const x = cx + Math.cos(a) * 20;
+      const y = cy + Math.sin(a) * 8 + Math.cos(a * 2) * 0.4 * 8;
+      this._dot(x, y, 1.5, colD);
+    }
+  }
+
+  // searching: 扫描子午线扫过点状地球（蓝色）
+  _draw_searching(t) {
+    const cx = 36, cy = 36, col = this._col(), colD = this._colDim();
+    // 点状球体
+    for (let i = 0; i < 20; i++) {
+      const lat = (i / 20) * Math.PI - Math.PI / 2;
+      for (let j = 0; j < 10; j++) {
+        const lon = (j / 10) * Math.PI * 2 + t * 0.01;
+        const rx = 18 * Math.cos(lat);
+        const ry = 18 * Math.sin(lat);
+        const x = cx + Math.cos(lon) * rx;
+        const y = cy + Math.sin(lon) * ry;
+        const z = Math.sin(lon) * rx;
+        if (z > 0) {
+          const alpha = 0.3 + 0.7 * (z / 18);
+          this._dot(x, y, 2 * alpha, this._colDim(0.2 + 0.4 * alpha));
+        }
+      }
+    }
+    // 扫描线
+    const scan = (t * 0.04) % (Math.PI * 2);
+    for (let i = -20; i <= 20; i++) {
+      const lat2 = (i / 40) * Math.PI;
+      const x2 = cx + Math.cos(scan + lat2 * 0.5) * 18;
+      const y2 = cy + Math.sin(lat2) * 7 + Math.cos(scan) * 3;
+      if (x2 > cx - 18 && x2 < cx + 18) {
+        this._dot(x2, y2, 2.5 + 0.5 * Math.sin(t * 0.06), col);
+      }
+    }
+  }
+
+  // solving: 条码归位（绿色）
+  _draw_solving(t) {
+    const cx = 36, cy = 36;
+    const count = 10;
+    const phase = (t * 0.05) % 1;
+    const col = this._col();
+    for (let i = 0; i < count; i++) {
+      const targetX = cx - 20 + (i / (count - 1)) * 40;
+      const offset = Math.sin(t * 0.02 + i * 2) * (1 - phase) * 20;
+      const x = targetX + offset;
+      const h = 10 + Math.sin(i * 1.5) * 6;
+      const y = cy - h / 2;
+      const alpha = 0.4 + 0.6 * (1 - Math.abs(offset) / 20);
+      this._rect(x - 2, y, 4, h, this._col(0.4 + 0.5 * alpha));
+    }
+  }
+
+  // listening: 波形滚过环状轨道（青色）
+  _draw_listening(t) {
+    const cx = 36, cy = 36, col = this._col(), colD = this._colDim();
+    const r = 16;
+    // 环
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      this._dot(x, y, 2, colD);
+    }
+    // 波形
+    const waveCount = 6;
+    for (let i = 0; i < waveCount; i++) {
+      const angle = (i / waveCount) * Math.PI * 2 + t * 0.04;
+      const wave = Math.sin(angle * 3 + t * 0.08) * 6;
+      const x = cx + Math.cos(angle) * (r + wave * 0.5);
+      const y = cy + Math.sin(angle) * (r + wave * 0.5);
+      this._dot(x, y, 3 + wave * 0.3, col);
+    }
+  }
+
+  // composing: 多段波形起伏（橙色）
+  _draw_composing(t) {
+    const cx = 36, cy = 36;
+    for (let band = 0; band < 3; band++) {
+      const bandY = cy - 12 + band * 12;
+      const freq = 2 + band * 0.5;
+      const speed = 0.03 + band * 0.01;
+      for (let i = 0; i <= 20; i++) {
+        const x = cx - 20 + (i / 20) * 40;
+        const wave = Math.sin(i * freq * 0.3 + t * speed) * 5;
+        const y = bandY + wave;
+        const alpha = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(i * 0.5 + t * 0.02 + band));
+        this._dot(x, y, 2.5 * alpha, this._col(0.3 + 0.5 * alpha));
+      }
+    }
+  }
+
+  // shaping: 轮廓变形（圆→三角→方）（粉色）
+  _draw_shaping(t) {
+    const cx = 36, cy = 36, col = this._col(), colD = this._colDim();
+    const morph = (Math.sin(t * 0.02) + 1) / 2;
+    const count = 16;
+    for (let i = 0; i < count; i++) {
+      const baseAngle = (i / count) * Math.PI * 2;
+      let r;
+      if (morph < 0.5) {
+        const t2 = morph * 2;
+        const triR = 14 * (1 + 0.3 * Math.cos(baseAngle * 3));
+        r = 14 * (1 - t2) + triR * t2;
+      } else {
+        const t2 = (morph - 0.5) * 2;
+        const sqR = 14 / Math.max(0.01, Math.cos(baseAngle % (Math.PI / 2) - Math.PI / 4));
+        const triR = 14 * (1 + 0.3 * Math.cos(baseAngle * 3));
+        r = triR * (1 - t2) + sqR * t2;
+      }
+      r = Math.min(r, 18);
+      const x = cx + Math.cos(baseAngle) * r;
+      const y = cy + Math.sin(baseAngle) * r;
+      const alpha = 0.5 + 0.5 * (0.5 + 0.5 * Math.sin(i + t * 0.05));
+      this._dot(x, y, 2.5 * alpha, this._col(0.3 + 0.5 * alpha));
+    }
+  }
+
+  // ── 基础绘制 ──
+  _dot(x, y, r, color) {
+    this.ctx.beginPath();
+    this.ctx.arc(x, y, Math.max(0.5, r), 0, Math.PI * 2);
+    this.ctx.fillStyle = color;
+    this.ctx.fill();
+  }
+
+  _rect(x, y, w, h, color) {
+    this.ctx.fillStyle = color;
+    this.ctx.fillRect(x, y, w, h);
+  }
+}
+
+// ── 全局 CogniOrb 实例 ──
+let _orb = null;
+
+// ── AI 加载态关联: narration 关键词 → orb 状态 ──
+const _narration2orb = {
+  search: 'searching', 回忆: 'searching', 查: 'searching', 抓取: 'searching',
+  写入: 'working', 执行: 'working', 编辑: 'working', 读取: 'working', 浏览: 'working',
+  分析: 'solving', 计算: 'solving',
+  保存: 'composing', 生成: 'composing', 查看: 'composing', 检查: 'composing', 清理: 'composing',
+  监听: 'listening', 等待: 'listening',
+  构思: 'shaping', 规划: 'shaping',
+};
+function _narrationToOrbState(text) {
+  for (const [kw, state] of Object.entries(_narration2orb)) {
+    if (text.includes(kw)) return state;
+  }
+  return 'working';
+}
+
+// ── Starter Prompts ──
+function sendStarter(text) {
+  document.getElementById('msg-input').value = text;
+  sendMsg();
+}
+
+// ── Placeholder 轮播 ──
+const _placeholders = ['给 Agent 发消息…', '记录一个想法…', '搜索记忆…', '问点什么…'];
+let _phIdx = 0;
+let _phTimer = null;
+
+function _cyclePlaceholder() {
+  const inp = document.getElementById('msg-input');
+  if (!inp || document.activeElement === inp) return;  // 用户正在输入时不切换
+  _phIdx = (_phIdx + 1) % _placeholders.length;
+  inp.placeholder = _placeholders[_phIdx];
+}
+
+// ── 初始化 Orb + Placeholder 轮播（在 DOM 加载后） ──
+document.addEventListener('DOMContentLoaded', () => {
+  _orb = new CogniOrb('orb-canvas', 'orb-label');
+  // 每 5 秒切换一次 placeholder
+  _phTimer = setInterval(_cyclePlaceholder, 5000);
+});
+
+
+// ════════════════════════════════════════════════════════════
+//  Init
+// ════════════════════════════════════════════════════════════
 // Clean up empty sessions from previous bugs
 try {
   const d = D();

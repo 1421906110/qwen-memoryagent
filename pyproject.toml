@@ -9,4 +9,5 @@ dependencies = [
     "uvicorn[standard]",
     "pydantic>=2.0",
     "numpy",
+    "mcp>=1.1",
 ]

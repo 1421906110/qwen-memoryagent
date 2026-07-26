@@ -43,6 +43,7 @@ from memory_agent.services.llm_client import LLMClient
 from memory_agent.services.memory_service import MemoryService
 from memory_agent.storage import SQLiteStore
 from memory_agent.agent import Agent, SelfReflector, ToolRegistry, _BASE_SYSTEM_PROMPT
+from memory_agent.agent import TurnEngine, Mode, ToolCache  # 🔥 v0.17
 from memory_agent.agent.tools import register_all_tools
 from cognimem.core.brain import CogniMem
 from cognimem.core.db import DatabaseAdapter
@@ -111,100 +112,12 @@ def _ts_to_epoch(ts_val) -> int:
 
 
 def _strip_thinking_text(text: str) -> str:
-    """去掉 LLM 回复开头的内心独白/思考过程，只保留实际回复。
+    """🔥 v0.17: 已废弃！保留仅用于引用。
 
-    不再用关键词列表（打地鼠），改用**结构检测**：
-    - 自我指涉规则分析型：我/我们 + 应该/需要/必须 + 做某事
-    - 假设调用型：假设/假如 + 调用了/运行了/执行了 + 工具
-    - 引述规则型：引用用户说/系统提示/铁律/规则
-    - 日期规则分析型：关于日期/时间的内部对话
-
-    核心思路：句子内容是关于"该怎么做"而不是"做了什么" → 跳过
+    v0.17 在 llm_client.chat_stream() 源头就分离了 reasoning_content，
+    不再需要事后过滤。此函数将在后续版本删除。
     """
-    text = text.strip()
-    if not text:
-        return text
-
-    # 按句末标点分割
-    segments = re.split(r'(?<=[。！？!?\n])', text)
-    segments = [s.strip() for s in segments if s.strip()]
-    if len(segments) < 2:
-        return text
-
-    # ── 思考文本匹配规则（按优先级）──
-    # 每条规则是一个 (regex_pattern, description) 元组
-    _think_patterns = [
-        # 1. 自我指涉 + 规则/义务分析：我/我们 + 应该/需要/必须/可以/要 + ...做某事...
-        (r'(我|我们)\s*(应该|需要|必须|可以|要|得)\s*(先|调|执行|运行|查|搜索|确认|读|写|回答|回复|直接|按照|列|使用|假装)',
-         "self-referential obligation"),
-        # 2. 假设调用型：假设/假如 + 调用了/执行了/运行了
-        (r'(假设|假如|如果)\s*(我|我们)?\s*(调用了|运行了|执行了|使用了|尝试)',
-         "hypothetical invocation"),
-        # 3. 工具调用规则分析：必须调 + 工具名/shell/date
-        (r'(必须调|需要调|应该调|要调)\s*(shell|date|工具|web_search|write_file)',
-         "must-call-tool analysis"),
-        # 4. 引述规则/系统提示：铁律/规则/系统提示/注意事项
-        (r'(铁律|规则要求|系统提示|根据提示|按照规则|按照要求|注意事项)',
-         "citing rules"),
-        # 5. 用户话语分析：用户说/用户问/用户打招呼 + 分析性质
-        (r'用户\s*(说|问|打招呼|当前|已经|正在|想要|要求|在问|的问题|提到的)',
-         "analyzing user input"),
-        # 6. 会话开始型：我们开始对话/我们被问到/这是新对话
-        (r'(我们开始对话|我们被问|这是新对话|这个对话的|当前对话)',
-         "session start analysis"),
-        # 7. 日期/时间规则分析
-        (r'关于\s*(日期|时间|当前)\s*(问题|铁律|规则|要求|必须|需要|应该)',
-         "date/time rule analysis"),
-        # 8. 已提供/已确认 + 但规则要求（矛盾型思考）
-        (r'(已经提供了|已经确认|已用\s*date\s*命令确认).{0,30}(但是|不过|但|然而)',
-         "conflict analysis"),
-        # 9. 然后类规划：然后(我|我们)应该/需要/要...
-        (r'然后\s*(我|我们)?\s*(应该|需要|可以|必须|要|得)',
-         "sequential planning"),
-        # 10. 所以/因此 + 规则结论
-        (r'(所以|因此|那么)\s*(我|我们)?\s*(应该|需要|直接|先|要)',
-         "rule conclusion"),
-        # 11. 直接回答/直接回复/不需要思考 - 这种本身是思考指令但混合了思考
-        (r'(直接回答|直接回复|直接返回|输出不要思考|不需要思考过程|不回忆不推理|不需要加)',
-         "directive about thinking"),
-        # 12. 用户已XXX + 所以我应该（混合型思考）
-        (r'用户已.{0,20}(。|，).{0,30}(所以|因此|那么|不过|但)', "user-did + conclusion"),
-        # 13. 作为小明/AI/助手 + 应该如何
-        (r'作为\s*(小明|AI|助手|一个)\s*(，|,)\s*(我)?\s*(应该|需要|要)',
-         "role-based obligation"),
-        # 14. 但系统/规则/铁律（转折型规则思考）
-        (r'但\s*(系统|提示|规则|铁律|要求|由于|根据|按照)',
-         "but-system rule thinking"),
-        # 14. 先(确认|查|看|执行|运行)一下 + 工具类内容
-        (r'先\s*(确认|查一查|查一下|看一下|执行一下|运行一下).{0,20}(工具|shell|date|命令|搜索)',
-         "pre-check planning"),
-        # 15. 由于/因为 + 规则/要求 + 所以（因果型规则思考）
-        (r'(由于|因为)\s*(系统|规则|铁律|要求|提示|用户).{0,30}(所以|因此|那么)',
-         "causal rule thinking"),
-    ]
-
-    def _is_thinking_segment(seg: str) -> bool:
-        """判断一个句段是否为思考内容"""
-        s = seg[:80]  # 看前80字就够了
-        # 如果句子太短（<8字）且不含实际内容 → 不判断为思考
-        if len(s) < 6:
-            return False
-        for pattern, _ in _think_patterns:
-            if re.search(pattern, s):
-                return True
-        return False
-
-    # 从第一段开始检查，跳过所有思考段
-    for i, seg in enumerate(segments):
-        if not _is_thinking_segment(seg):
-            remaining = "".join(segments[i:])
-            # 如果剩下的内容太短（<4字）可能只是思考段的尾巴，继续用更后一段
-            if len(remaining.strip()) < 4 and i + 1 < len(segments):
-                continue
-            return remaining
-
-    # 全部都是思考内容 → 取最后一段（至少有点内容）
-    return segments[-1]
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +130,62 @@ llm: LLMClient | None = None
 cogni: CogniMem | None = None  # 直接集成，非 HTTP 客户端
 agent: Agent | None = None
 tool_registry: ToolRegistry | None = None
+
+# 🔥 v0.17: TurnEngine 实例
+turn_engine: TurnEngine | None = None
+
+
+# 🔥 v0.17: Narration → Orbs 状态映射（前端用）
+NARRATION_TO_ORB = {
+    "正在搜索": "searching",
+    "正在回忆": "searching",
+    "正在查": "searching",
+    "正在抓取": "searching",
+    "正在写入": "working",
+    "正在执行": "working",
+    "正在编辑": "working",
+    "正在读取": "working",
+    "正在浏览": "working",
+    "正在分析": "solving",
+    "正在计算": "solving",
+    "正在保存": "composing",
+    "正在生成": "composing",
+    "正在查看": "composing",
+    "正在检查": "composing",
+    "正在清理": "composing",
+    "正在监听": "listening",
+    "正在等待": "listening",
+    "正在构思": "shaping",
+    "正在规划": "shaping",
+}
+
+
+def _orb_state_from_narration(text: str) -> str:
+    """从 narration 文本推断前端 Orbs 动画状态"""
+    for keyword, state in NARRATION_TO_ORB.items():
+        if keyword in text:
+            return state
+    return "working"  # 默认
+
+
+def _setup_memory_service(llm_client=None):
+    """初始化 MemoryService（用于 fallback 端点，当 CogniMem active 时也需要）"""
+    global memory_service, store
+    if store is None:
+        db_path = os.getenv("MEMORY_DB_PATH", "~/.qwen-memory/memory.db")
+        store = SQLiteStore(db_path)
+    if llm_client:
+        embed_fn = None
+        try:
+            test_emb = llm_client.embed("test")
+            if test_emb and len(test_emb) > 0:
+                embed_fn = llm_client.embed
+        except Exception:
+            pass
+        memory_service = MemoryService(store=store, llm_embed_fn=embed_fn, llm_client=llm_client)
+    else:
+        memory_service = MemoryService(store=store)
+    logger.info("📦 MemoryService initialized for fallback endpoints")
 
 
 @asynccontextmanager
@@ -296,22 +265,14 @@ async def lifespan(_app: FastAPI):
                     len(tool_registry._tools))
     elif llm:
         logger.warning("⚠️ CogniMem not connected — agent engine disabled")
-
-        # Test if embedding actually works (some providers don't support it)
-        embed_fn = None
-        try:
-            test_emb = llm.embed("test")
-            if test_emb and len(test_emb) > 0:
-                embed_fn = llm.embed
-                logger.info("Embedding model available: %s", llm.embedding_model)
-        except Exception:
-            logger.info("Embedding not available — using FTS5 fallback")
-
-        memory_service = MemoryService(store=store, llm_embed_fn=embed_fn, llm_client=llm)
-        logger.info("LLM client initialised with model=%s", llm.model)
+        _setup_memory_service(llm)
     else:
-        memory_service = MemoryService(store=store)
         logger.warning("QWEN_API_KEY not set — running without embeddings/LLM")
+
+    # ⭐ Always initialize memory_service for fallback endpoints (process-transcript, chat/long)
+    # Must come after the agent block so memory_service is always available
+    if memory_service is None:
+        _setup_memory_service(llm)
 
     # ── ⭐ 启动检查汇总 ──
     for check in _startup_checks:
@@ -382,6 +343,10 @@ TEMPLATES_DIR = HERE / "templates"
 STATIC_DIR = HERE / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# 🔥 v0.17: Webhook 连接器（冷启动）
+from memory_agent.connectors.handler import router as webhook_router
+app.include_router(webhook_router)
 
 
 import functools
@@ -667,6 +632,55 @@ def _build_context(
         except Exception as e:
             logger.warning("Memory recall failed: %s", e)
 
+    # ⭐ 关键词回退：DeepSeek 不支持 embedding，语义召回经常为空
+    # 当召回中缺少高价值类型（preference/事实类）时触发
+    _has_good_recall = any(f.get("fact_type") in ("preference", "fact", "goal", "decision") for f in recalled)
+    _db_ref = cogni.fact_network.db if cogni and cogni.fact_network else None
+    if (not _has_good_recall or len(recalled) <= 1) and _db_ref:
+        try:
+            # 偏好类问题跨 agent 搜 preference 类型
+            _pref_kw = ["喜欢", "喝", "吃", "爱", "偏好", "口味", "兴趣", "咖啡", "茶", "饮料"]
+            if any(kw in user_message for kw in _pref_kw):
+                with _db_ref._plain_cursor_ctx() as cur:
+                    cur.execute("SELECT * FROM facts WHERE fact_type='preference' ORDER BY confidence DESC LIMIT 4")
+                    rows = cur.fetchall()
+                    # 矛盾偏好只取置信度最高的那条（避免「喜欢」和「不喜欢」同时出现让 LLM 困惑）
+                    _seen_subject = {}
+                    for row in rows:
+                        cols = [desc[0] for desc in cur.description]
+                        d = dict(zip(cols, row))
+                        f = _db_ref._dict_to_fact(d)
+                        _fd = f.to_dict()
+                        _subj = _fd.get("subject", "")
+                        if _subj not in _seen_subject:
+                            _seen_subject[_subj] = _fd
+                    for _fd in _seen_subject.values():
+                        if _fd not in recalled:
+                            recalled.append(_fd)
+
+            # 通用关键词匹配（跨 agent）
+            if not recalled:
+                _kw = re.sub(r'[^一-鿿\w]', ' ', user_message).strip()
+                _words = [w for w in _kw.split() if len(w) >= 2]
+                for w in _words:
+                    with _db_ref._plain_cursor_ctx() as cur:
+                        cur.execute("""
+                            SELECT * FROM facts WHERE (
+                                subject ILIKE %s OR predicate ILIKE %s OR "object" ILIKE %s
+                            ) ORDER BY confidence DESC LIMIT 4
+                        """, (f'%{w}%', f'%{w}%', f'%{w}%'))
+                        for row in cur.fetchall():
+                            cols = [desc[0] for desc in cur.description]
+                            d = dict(zip(cols, row))
+                            f = _db_ref._dict_to_fact(d)
+                            _fd = f.to_dict()
+                            if _fd not in recalled:
+                                recalled.append(_fd)
+                    if recalled:
+                        break
+        except Exception as e:
+            logger.debug("Keyword fallback search failed: %s", e)
+
     # ── L1: 最近多轮原文（保连贯）──
     recent = []
     if conversation_history:
@@ -683,7 +697,8 @@ def _build_context(
 
     # ⭐ 日期问题：直接执行 date 注入结果（不走 Agent 循环也能答对）
     DATE_KW = ["今天", "几号", "星期", "多少号", "这个月", "几月",
-               "多少天", "当前时间", "现在时间", "年月日", "什么日期"]
+               "多少天", "当前时间", "现在时间", "年月日", "什么日期",
+               "几点", "时间", "几点了", "几点钟", "什么时候"]
     if any(kw in user_message for kw in DATE_KW):
         import subprocess as _sp
         try:
@@ -723,7 +738,11 @@ def _build_context(
             if any(kw in (p + o) for kw in ["小七", "小智", "小可爱"]):
                 continue
             conf = f.get("confidence", 0.5)
-            if conf < 0.3:
+            # preference 类型放宽阈值（可能被衰减了但仍有价值）
+            if ft == "preference":
+                if conf < 0.1:
+                    continue
+            elif conf < 0.3:
                 continue
             lines.append(f"- {s}{p}{o}")
             seen_types[ft] = seen_types.get(ft, 0) + 1
@@ -800,6 +819,7 @@ async def chat_stream(req: ChatRequest):
             "写入", "编辑", "创建", "写", "生成",
             "改", "删", "跑", "试", "调用", "执行", "运行", "安装",
             "分析", "对比",
+            "记住", "记住我", "记一下", "记好", "帮我记住", "请记住",
         ]
         # ⭐ 继续/下一步 → 必须进 Agent 路径（否则不能调工具继续写文件等操作）
         IS_CONTINUATION = (
@@ -831,23 +851,38 @@ async def chat_stream(req: ChatRequest):
                         "不要以「我们被问」「用户说」「根据规则」开头。直接说内容。"
                     ),
                 })
-                full_text = ""
-                stream = llm.chat_stream(
+                # ⭐ 先发送 narration，告知前端我在搜索/思考（不阻塞）
+                yield f"data: {json.dumps({'type': 'narration', 'content': '搜索中…'})}\n\n"
+                yield f"data: {json.dumps({'type': 'orb_state', 'content': 'searching'})}\n\n"
+
+                # ⭐ 在后台线程执行 LLM 调用，不阻塞事件循环
+                _loop = asyncio.get_running_loop()
+                _llm_fn = functools.partial(
+                    llm.chat_stream,
                     messages=llm_messages,
                     system_prompt=None,
                     temperature=0.5,
                     max_tokens=2048,
                 )
-                for token in stream:
-                    full_text += token
+                # lambda ''.join() 在后台线程中迭代同步生成器
+                _future = _loop.run_in_executor(None, lambda: ''.join(_llm_fn()))
+                while not _future.done():
+                    _done, _ = await asyncio.wait([_future], timeout=15.0)
+                    if not _future.done():
+                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                full_text = _future.result()
 
-                # ⭐ 去除 LLM 输出中的内心独白/思考过程
-                cleaned = _strip_thinking_text(full_text)
+                # 🔥 v0.17: 源头已分离（llm_client 不 yield reasoning_content）
+                # 不再需要 _strip_thinking_text() 事后过滤
+                # ⭐ v0.18: Strip 【完成】标记（简单路径不需要，这是 Agent 路径用的）
+                cleaned = full_text.replace("【完成】", "").strip() or full_text.strip()
 
                 # ⭐ 空响应保护：LLM 返回空时自动降级到 Agent 路径
                 if not cleaned.strip():
                     logger.warning("🛑 LLM returned empty for simple query — falling back to agent")
                     _record_api_call(success=False, error_msg="empty_response")
+                    # 🔥 v0.17: Send narration event
+                    yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
                     # ⭐ 子线程执行，不阻塞事件循环
                     _loop = asyncio.get_running_loop()
                     _agent_fn = functools.partial(
@@ -879,6 +914,8 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             else:
                 logger.info("Complex task detected — using agent loop")
+                # 🔥 v0.17: Send narration event (frontend shows orb + text)
+                yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
                 # ⭐ 在子线程运行 agent.chat()，不阻塞事件循环
                 # SSE 连接 15s 无数据会超时 → 每 15s 发心跳保活
                 _loop = asyncio.get_running_loop()
@@ -903,10 +940,14 @@ async def chat_stream(req: ChatRequest):
                 # ⭐ Agent 空响应保护
                 if not reply.strip():
                     logger.warning("🛑 Agent returned empty reply — using fallback")
-                    reply = (
-                        f"抱歉，我刚才没正确处理。你说「{req.message[:40]}」，"
-                        "能再说一次吗？我一定直接执行，不废话。"
-                    )
+                    tools = result.get("tools_called", 0)
+                    if tools > 0:
+                        reply = f"已执行 {tools} 次操作。还要帮你做点别的吗？"
+                    else:
+                        reply = (
+                            f"抱歉，我刚才没正确处理。你说「{req.message[:40]}」，"
+                            "能再说一次吗？我一定直接执行，不废话。"
+                        )
 
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 tools = result.get("tools_called", 0)
@@ -920,6 +961,8 @@ async def chat_stream(req: ChatRequest):
             _record_api_call(success=False, error_msg=str(e))
             # ⭐ 异常时也尝试降级到 Agent 路径
             logger.warning("🛑 chat_stream error — trying agent fallback: %s", e)
+            # 🔥 v0.17: Send narration before agent fallback
+            yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
             try:
                 # ⭐ 子线程执行，不阻塞事件循环
                 _loop = asyncio.get_running_loop()
@@ -957,12 +1000,46 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    """Chat with memory-augmented Qwen Agent.
+    """Chat with memory-augmented Agent.
 
-    用 三层压缩（L1回闪+L2蒸馏液+L3图谱）替代原始历史拼接。
+    对搜索/查新闻类简单请求，也用简单路径（省 token 又快）。
+    复杂任务（写文件/分析/执行）走 agent 路径。
     """
+    msg = req.message.strip()
+    _ACTION_WORDS = [
+        "爬", "下载", "读取", "写入", "编辑", "创建", "写", "生成",
+        "改", "删", "跑", "试", "调用", "执行", "运行", "安装",
+        "分析", "对比", "搜", "查", "搜索", "查找", "查询", "百度",
+        "记住", "记住我", "记一下", "记好", "帮我记住", "请记住",
+    ]
+    _IS_CONT = msg in ("继续", "继续！", "继续执行") or msg.startswith("继续") or msg in ("next", "continue", "go on")
+    _has_action = any(v in msg.lower() for v in _ACTION_WORDS)
+    is_simple = (len(msg) < 60) and not _has_action and not _IS_CONT
+
+    if is_simple:
+        # ⭐ 简单路径
+        system, llm_messages = _build_context(
+            user_message=msg, agent_id=req.agent_id,
+            session_id=req.session_id, conversation_history=req.messages,
+        )
+        try:
+            # ⭐ 用 chat() 而非 chat_stream()：DeepSeek thinking 模式将 reasoning_content
+            # 和 content 分开返回，chat_stream 把两者都 yield 出来导致思考内容泄漏。
+            # chat() 只返回 content，不包含 reasoning_content，天然避免泄漏。
+            full_text = llm.chat(
+                messages=llm_messages, system_prompt=None,
+                temperature=0.5, max_tokens=4096,
+            )
+        except Exception as e:
+            logger.warning("简单路径 LLM 调用失败: %s", e)
+            full_text = ""
+        if full_text.strip():
+            reply = full_text.replace("【完成】", "").strip() or full_text.strip()
+            return {"agent_id": req.agent_id, "reply": reply, "memories_used": 0, "tools_called": 0, "iterations": 0, "tool_sequence": []}
+        # 降级到 agent
+        logger.warning("simple path empty — falling back to agent")
+
     if agent:
-        # Agent 模式：传压缩后的最近消息
         recent = []
         if req.messages:
             recent = [{"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
@@ -976,12 +1053,11 @@ async def chat(req: ChatRequest):
         )
         reply = result.get("reply", "")
         if not reply.strip():
-            reply = (
-                f"我是小明！你刚刚说「{req.message[:40]}」，"
-                "我不太确定需要做什么具体操作。"
-                "我可以搜索信息、看网页、读写文件、或者记住事情。"
-                "直接告诉我想干什么就行！"
-            )
+            tools = result.get("tools_called", 0)
+            if tools > 0:
+                reply = f"已执行 {tools} 次操作。还要帮你做点别的吗？"
+            else:
+                reply = "抱歉，我没能处理好，请再试一次。"
         return {
             "agent_id": req.agent_id,
             "reply": reply,
@@ -1178,15 +1254,14 @@ async def chat_long(req: ChatLongRequest):
         pref_text = "\n".join(f"- {p.get('content', '')}" for p in prefs["preferences"])
         system += f"\n\n## Known Preferences\n{pref_text}"
 
-    # 4. If long_context provided, use qwen-max-longcontext
-    use_model = None
+    # 4. If long_context provided, append it as additional context
+    use_model = None  # ⭐ 使用 LLM 默认模型（DeepSeek 没有 qwen-max-longcontext）
     if req.long_context:
-        use_model = "qwen-max-longcontext"
         user_content = (
             f"{req.message}\n\n"
             f"## Additional Context Document\n{req.long_context}"
         )
-        logger.info("Using long-context model for chat with document")
+        logger.info("Using long-context mode (appending document to message)")
     else:
         user_content = req.message
 
@@ -1299,6 +1374,33 @@ async def get_preferences(agent_id: str):
     """Get active preferences for an agent."""
     assert store is not None
     prefs = store.get_active_preferences(agent_id)
+
+    # ⭐ 如果 store 返回空，fallback 到 CogniMem 跨 agent 搜索
+    if (not prefs or not prefs.get("preferences")) and cogni:
+        try:
+            _db = cogni.fact_network.db
+            if _db:
+                with _db._plain_cursor_ctx() as cur:
+                    cur.execute("SELECT * FROM facts WHERE fact_type='preference' ORDER BY confidence DESC LIMIT 10")
+                    rows = cur.fetchall()
+                    all_prefs = []
+                    for row in rows:
+                        cols = [desc[0] for desc in cur.description]
+                        d = dict(zip(cols, row))
+                        f = _db._dict_to_fact(d)
+                        fd = f.to_dict()
+                        all_prefs.append({
+                            "content": f"{fd.get('subject','')} {fd.get('predicate','')} {fd.get('object','')}",
+                            "confidence": fd.get("confidence", 0),
+                            "fact_type": "preference",
+                            "source": fd.get("source_session", ""),
+                            "agent_id": fd.get("agent_id", ""),
+                        })
+                    if all_prefs:
+                        return {"agent_id": agent_id, "preferences": {"preferences": all_prefs}}
+        except Exception as e:
+            logger.debug("Preferences fallback failed: %s", e)
+
     return {"agent_id": agent_id, "preferences": prefs}
 
 
@@ -1521,9 +1623,9 @@ def _resolve_agent(agent_id: str) -> str:
     return agent_id
 
 
-@app.get("/agents")
+@app.get("/agents", tags=["📋 数据查询"])
 async def list_agents():
-    """列出所有有数据的 Agent"""
+    """列出所有有数据的 Agent（含事实数量）"""
     agents = []
     # 从 CogniMem PostgreSQL 获取所有 agent_id
     if cogni and cogni.fact_network and cogni.fact_network.db:
@@ -1570,7 +1672,7 @@ async def stats(agent_id: str):
 #  记忆管理 API（Dashboard 使用）
 # ═══════════════════════════════════════════════
 
-@app.get("/memories")
+@app.get("/memories", tags=["📋 数据查询"], summary="查看 Agent 的所有记忆（分页）")
 async def list_memories(agent_id: str = "default", limit: int = 50, offset: int = 0):
     """列出 Agent 的所有记忆（分页），附带矛盾标记"""
     if cogni is None:
@@ -1608,9 +1710,9 @@ async def list_memories(agent_id: str = "default", limit: int = 50, offset: int 
         return {"agent_id": agent_id, "memories": [], "total": 0, "error": str(e)}
 
 
-@app.delete("/memories/{fact_id}")
+@app.delete("/memories/{fact_id}", tags=["🔴 数据管理"], summary="删除单条记忆（按 fact_id）")
 async def delete_memory(fact_id: str, agent_id: str = "default"):
-    """删除一条特定记忆"""
+    """删除某条具体记忆（事实），需要知道 fact_id（从 /memories 或 /agent 获取）"""
     if cogni is None:
         return {"status": "error", "detail": "CogniMem 未初始化"}
     try:
@@ -1652,9 +1754,18 @@ async def consolidate(agent_id: str = "default"):
     }
 
 
-@app.delete("/clear")
+@app.delete("/clear", tags=["🔴 数据管理"], summary="清空指定 Agent 全部记忆数据（不可恢复）")
 async def clear_memories(agent_id: str = "default"):
-    """🗑️ 清除某个 Agent 的所有记忆"""
+    """删除某个 Agent 的全部数据（事实/三元组/偏好等），不可恢复！
+
+    用法：
+      1. 先调 GET /agents 查看所有 Agent ID
+      2. 把要清除的 agent_id 填进来
+      3. 执行后该 Agent 所有记忆将被永久删除
+
+    参数:
+      agent_id: 要清除的 Agent ID（默认 "default"）
+    """
     if cogni is None:
         return {"agent_id": agent_id, "deleted": 0, "message": "CogniMem 未初始化"}
     try:

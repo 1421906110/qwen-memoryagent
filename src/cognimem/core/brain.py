@@ -50,7 +50,7 @@ class CogniMem:
                    or os.environ.get("QWEN_API_KEY", ""))
         if use_llm and api_key:
             model = (self.config.get("llm_model", "")
-                     or os.environ.get("QWEN_MODEL", "deepseek-chat"))
+                     or os.environ.get("QWEN_MODEL", "deepseek-v4-flash"))
             self.llm_extractor = LLMTripleExtractor(
                 api_key=api_key,
                 model=model,

@@ -408,7 +408,7 @@ class MemoryGovernor:
         ]
         text = " ".join(parts)
         # 也匹配 evidence 原文
-        for ev in fact.get("evidence", []):
+        for ev in (fact.get("evidence", []) or []):
             if isinstance(ev, dict):
                 text += " " + ev.get("statement", "")
             elif hasattr(ev, "statement"):

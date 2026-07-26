@@ -35,16 +35,18 @@
 
   /* ── Top bar ── */
   .topbar {
-    display: flex; align-items: center; gap: 12px; padding: 12px 20px;
-    background: var(--surface2); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; align-items: center; gap: 10px; padding: 12px 20px;
+    background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
     flex-wrap: wrap;
   }
-  .topbar h1 { font-size: 16px; font-weight: 600; margin-right: 8px; }
-  .topbar h1 span { color: #07c160; }
+  .topbar h1 { font-size: 15px; font-weight: 600; color: var(--accent); white-space: nowrap; margin: 0; }
+  .topbar h1 strong { font-weight: 700; }
+  .topbar .nav-sep { color: var(--border); font-size: 14px; }
+  .topbar .nav-page { font-size: 14px; font-weight: 500; color: var(--text-dim); white-space: nowrap; }
   .topbar label { font-size: 12px; color: var(--text-muted); }
   .topbar select, .topbar input {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 4px 8px; font-size: 13px;
+    border-radius: 6px; padding: 4px 8px; font-size: 12px;
   }
   .topbar .stat {
     font-size: 12px; color: #6b7280; margin-left: auto;
@@ -55,7 +57,35 @@
 
   .filter-group { display: flex; align-items: center; gap: 6px; }
   .filter-group label { cursor: pointer; display: flex; align-items: center; gap: 3px; font-size: 12px; }
-  .filter-group input[type="checkbox"] { accent-color: #07c160; }
+  .filter-group input[type="checkbox"] { accent-color: var(--accent); }
+
+  .search-wrap { position: relative; }
+  .search-wrap input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px 4px 22px; font-size: 12px;
+    width: 120px; outline: none; transition: all 0.2s;
+  }
+  .search-wrap input:focus { border-color: var(--accent); width: 160px; }
+  .search-wrap::before {
+    content: '⌕'; position: absolute; left: 6px; top: 50%;
+    transform: translateY(-50%); font-size: 13px; color: var(--text-muted);
+    pointer-events: none;
+  }
+
+  .nav-link {
+    color: var(--text-muted); text-decoration: none; font-size: 12px;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid transparent;
+    transition: all 0.15s; white-space: nowrap;
+  }
+  .nav-link:hover { background: var(--accent-soft); color: var(--accent); }
+  .nav-link.active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+  .refresh-btn {
+    background: var(--accent); color: #fff; border: none;
+    border-radius: 6px; padding: 5px 12px; font-size: 12px;
+    cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  }
+  .refresh-btn:hover { filter: brightness(1.1); }
 
   /* ── Canvas area ── */
   .graph-wrapper {
@@ -122,7 +152,12 @@
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 
   @media (max-width: 768px) {
+    .topbar .links { margin-left: 0 !important; }
+    .topbar .nav-page { display: none; }
+    .topbar .search-wrap { order: 10; width: 100%; }
+    .topbar .search-wrap input { width: 100%; }
     .topbar .stat { margin-left: 0; width: 100%; justify-content: space-around; }
+    .topbar .filter-group { order: 10; width: 100%; justify-content: center; }
     #detail-panel { width: 100%; right: -100%; }
   }
   @media (max-width: 480px) {
@@ -144,20 +179,26 @@
 <body>
 
 <div class="topbar">
-  <h1>🧠 <span>记忆关系图谱</span></h1>
+  <h1>🧠 <strong>MemoryAgent</strong></h1>
+  <span class="nav-sep">/</span>
+  <span class="nav-page">图谱</span>
   <label>Agent</label>
   <select id="agent-select" onchange="loadGraph()"></select>
+  <div class="search-wrap">
+    <input type="text" id="graph-search" placeholder="⌕ 搜索节点…" oninput="onSearchInput()">
+  </div>
+  <div class="links" style="display:flex;gap:3px;margin-left:auto">
+    <a href="/chat" class="nav-link">💬 聊天</a>
+    <a href="/dashboard" class="nav-link">📊 仪表盘</a>
+    <a href="/graph" class="nav-link active">🔗 图谱</a>
+  </div>
   <div class="filter-group" id="type-filters"></div>
+  <button onclick="loadGraph()" class="refresh-btn">🔄 刷新</button>
   <div class="stat">
     <span>节点 <strong id="stat-nodes">0</strong></span>
     <span>连线 <strong id="stat-edges">0</strong></span>
     <span>密度 <strong id="stat-density">0</strong></span>
     <span>🧠 <strong id="stat-abstr">0</strong></span>
-  </div>
-  <button onclick="loadGraph()" style="background:#07c160;color:#fff;border:none;border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">🔄 刷新</button>
-  <div style="display:flex;gap:4px;margin-left:8px">
-    <a href="/chat" style="color:#4b5563;text-decoration:none;font-size:12px;padding:5px 12px;border-radius:6px;border:1px solid #e0e2e6;background:#f3f4f6;transition:all var(--transition)">💬 聊天</a>
-    <a href="/dashboard" style="color:#4b5563;text-decoration:none;font-size:12px;padding:5px 12px;border-radius:6px;border:1px solid #e0e2e6;background:#f3f4f6;transition:all var(--transition)">📊 仪表盘</a>
   </div>
 </div>
 
@@ -364,82 +405,101 @@ function startSimulation() {
   const nodeMap = {};
   nodes.forEach(n => { nodeMap[n.id] = n; });
 
+  // ── 预模拟：跑 60 帧静默让节点稳定 ──
+  function _physicsTick(nodes, edges, nodeMap, W, H) {
+    for (const n of nodes) { n.fx = 0; n.fy = 0; }
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.max(5, Math.sqrt(dx*dx + dy*dy));
+        const force = 2000 / (dist * dist + 1);
+        a.fx -= force * dx / dist; a.fy -= force * dy / dist;
+        b.fx += force * dx / dist; b.fy += force * dy / dist;
+      }
+    }
+    for (const e of edges) {
+      const a = nodeMap[e.source], b = nodeMap[e.target];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+      const force = dist * e.strength * 0.008;
+      a.fx += force * dx / dist; a.fy += force * dy / dist;
+      b.fx -= force * dx / dist; b.fy -= force * dy / dist;
+    }
+    for (const n of nodes) {
+      n.fx += (W/2 - n.x) * 0.001;
+      n.fy += (H/2 - n.y) * 0.001;
+      n.fx += (Math.random() - 0.5) * 0.15;
+      n.fy += (Math.random() - 0.5) * 0.15;
+      n.vx = (n.vx + n.fx) * 0.8;
+      n.vy = (n.vy + n.fy) * 0.8;
+      n.x += n.vx;
+      n.y += n.vy;
+      n.x = Math.max(5, Math.min(W - 5, n.x));
+      n.y = Math.max(5, Math.min(H - 5, n.y));
+    }
+  }
+  for (let iter = 0; iter < 60; iter++) {
+    _physicsTick(nodes, edges, nodeMap, W, H);
+  }
+
   function simulate() {
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0, 0, W, H);
 
-    // Skip physics if too many nodes — just render
-    if (nodes.length <= 120) {
-      // Reset forces
-      for (const n of nodes) { n.fx = 0; n.fy = 0; }
-
-      // Repulsion (Barnes-Hut simplified)
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i], b = nodes[j];
-          const dx = b.x - a.x, dy = b.y - a.y;
-          const dist = Math.max(5, Math.sqrt(dx*dx + dy*dy));
-          const force = 2000 / (dist * dist + 1);
-          a.fx -= force * dx / dist;
-          a.fy -= force * dy / dist;
-          b.fx += force * dx / dist;
-          b.fy += force * dy / dist;
-        }
-      }
-
-      // Attraction along edges
-      for (const e of edges) {
-        const a = nodeMap[e.source], b = nodeMap[e.target];
-        if (!a || !b) continue;
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        const force = dist * e.strength * 0.008;
-        a.fx += force * dx / dist;
-        a.fy += force * dy / dist;
-        b.fx -= force * dx / dist;
-        b.fy -= force * dy / dist;
-      }
-
-      // Center gravity
-      for (const n of nodes) {
-        n.fx += (W/2 - n.x) * 0.001;
-        n.fy += (H/2 - n.y) * 0.001;
-      }
-
-      // Gentle random perturbation to keep nodes alive
-      for (const n of nodes) {
-        n.fx += (Math.random() - 0.5) * 0.15;
-        n.fy += (Math.random() - 0.5) * 0.15;
-      }
-
-      // Apply velocity
-      for (const n of nodes) {
-        n.vx = (n.vx + n.fx) * 0.8;
-        n.vy = (n.vy + n.fy) * 0.8;
-        n.x += n.vx;
-        n.y += n.vy;
-        n.x = Math.max(5, Math.min(W - 5, n.x));
-        n.y = Math.max(5, Math.min(H - 5, n.y));
+    // ── 背景：径向渐变 + 网格点 ──
+    const bgGrad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.6);
+    bgGrad.addColorStop(0, '#f5f3ff');
+    bgGrad.addColorStop(0.5, '#f0f2f5');
+    bgGrad.addColorStop(1, '#eaecf0');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+    // 网格点
+    ctx.fillStyle = 'rgba(139,92,246,0.03)';
+    for (let gx = 0; gx < W; gx += 28) {
+      for (let gy = 0; gy < H; gy += 28) {
+        ctx.beginPath(); ctx.arc(gx, gy, 0.6, 0, Math.PI*2); ctx.fill();
       }
     }
 
+    // 搜索过滤
+    const _searchQ = (document.getElementById('graph-search')?.value || '').toLowerCase().trim();
+
+    // Skip physics if too many nodes — just render
+    if (nodes.length <= 120) {
+      _physicsTick(nodes, edges, nodeMap, W, H);
+    }
+
     // ── Render ──
+    // Selected node's neighbors (for focus mode)
+    const focusNeighbors = new Set();
+    if (selectedNodeId) {
+      for (const e of edges) {
+        if (e.source === selectedNodeId) focusNeighbors.add(e.target);
+        if (e.target === selectedNodeId) focusNeighbors.add(e.source);
+      }
+    }
+
     // Edges
     for (const e of edges) {
       const a = nodeMap[e.source], b = nodeMap[e.target];
       if (!a || !b) continue;
+      const inFocus = !selectedNodeId || a.id === selectedNodeId || b.id === selectedNodeId || focusNeighbors.has(a.id) || focusNeighbors.has(b.id);
+      if (selectedNodeId && !inFocus) continue; // 聚焦模式下隐藏无关边
+
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      // ⭐ 抽象链接用虚线
       if (e.encoding_level === 'abstraction') {
         ctx.setLineDash([4, 4]);
         ctx.strokeStyle = 'rgba(139,92,246,0.4)';
         ctx.lineWidth = 1.5;
       } else {
         ctx.setLineDash([]);
-        ctx.strokeStyle = `rgba(148,163,184,${e.strength * 0.35})`;
-        ctx.lineWidth = e.strength * 2 + 0.5;
+        const alpha = selectedNodeId ? (inFocus ? 0.5 : 0.08) : e.strength * 0.35;
+        ctx.strokeStyle = `rgba(148,163,184,${alpha})`;
+        ctx.lineWidth = (selectedNodeId && inFocus) ? e.strength * 2 + 1 : e.strength * 2 + 0.5;
       }
       ctx.stroke();
       ctx.setLineDash([]);
@@ -453,20 +513,43 @@ function startSimulation() {
       const isHovered = n.id === hoveredNodeId;
       const color = isAbstraction ? '#8b5cf6' : (TYPE_COLORS[n.type] || '#94a3b8');
 
-      // Glow for selected
+      // 搜索过滤
+      const matchesSearch = !_searchQ || n.content.toLowerCase().includes(_searchQ);
+      const searchDim = _searchQ && !matchesSearch;
+      // 聚焦模式
+      const inFocus = !selectedNodeId || isSelected || focusNeighbors.has(n.id);
+      const focusDim = selectedNodeId && !inFocus;
+
+      // 光晕（glow）
+      const glowR = radius * 3.5;
+      const glow = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
+      const dimAlpha = searchDim || focusDim ? 0.02 : 0.18;
+      glow.addColorStop(0, color + Math.round(dimAlpha * 255).toString(16).padStart(2, '0'));
+      glow.addColorStop(1, 'transparent');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, glowR, 0, Math.PI*2);
+      ctx.fill();
+
+      // 选中节点外发光
       if (isSelected) {
+        const pulseR = radius + 6 + 2 * Math.sin(Date.now() * 0.005);
         ctx.beginPath();
-        ctx.arc(n.x, n.y, radius + 6, 0, Math.PI * 2);
-        ctx.fillStyle = color + '33';
+        ctx.arc(n.x, n.y, pulseR, 0, Math.PI * 2);
+        ctx.fillStyle = color + '44';
         ctx.fill();
       }
 
+      // 主圆点
+      const nodeAlpha = searchDim || focusDim ? 0.15 : 1;
+      ctx.globalAlpha = nodeAlpha;
       ctx.beginPath();
       ctx.arc(n.x, n.y, radius, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.fill();
+      ctx.globalAlpha = 1;
 
-      // ⭐ 抽象节点虚线边框
+      // 抽象节点虚线边框
       if (isAbstraction) {
         ctx.setLineDash([3, 2]);
         ctx.strokeStyle = '#8b5cf6';
@@ -481,13 +564,16 @@ function startSimulation() {
         ctx.stroke();
       }
 
-      // Label
-      if (n.confidence > 0.6 || isHovered || isAbstraction) {
-        ctx.fillStyle = isHovered ? '#fff' : (isAbstraction ? '#c4b5fd' : '#cbd5e1');
-        ctx.font = (isHovered || isAbstraction) ? 'bold 10px sans-serif' : '9px sans-serif';
+      // Label（搜索匹配/选中/hover才显示）
+      if ((matchesSearch && (n.confidence > 0.5 || isHovered || isAbstraction)) || isSelected) {
+        const labelAlpha = searchDim ? 0.2 : 1;
+        ctx.globalAlpha = labelAlpha;
+        ctx.fillStyle = isHovered ? '#1a1a2e' : (isAbstraction ? '#7c3aed' : '#6b7280');
+        ctx.font = (isHovered || isSelected || isAbstraction) ? 'bold 10px sans-serif' : '9px sans-serif';
         ctx.textAlign = 'center';
-        const label = n.content.length > 12 ? n.content.slice(0, 12) + '…' : n.content;
-        ctx.fillText(label, n.x, n.y - radius - 4);
+        const label = n.content.length > 14 ? n.content.slice(0, 14) + '…' : n.content;
+        ctx.fillText(label, n.x, n.y - radius - 5);
+        ctx.globalAlpha = 1;
       }
     }
 
@@ -634,10 +720,36 @@ function renderLegend() {
   ).join('');
 }
 
+// ── 搜索输入 ──
+function onSearchInput() {
+  // 搜索通过 simulate() 中的实时过滤实现，不需要做额外操作
+  // 只是选中第一个匹配节点方便查看
+  const q = (document.getElementById('graph-search')?.value || '').toLowerCase().trim();
+  if (q) {
+    const match = nodes.find(n => n.content.toLowerCase().includes(q));
+    if (match) {
+      selectedNodeId = match.id;
+      showDetail(match);
+    }
+  } else {
+    closeDetail();
+  }
+}
+
 // ── Keyboard shortcuts ──
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeDetail();
+  if (e.key === 'Escape') {
+    closeDetail();
+    const searchInp = document.getElementById('graph-search');
+    if (searchInp && searchInp.value) { searchInp.value = ''; onSearchInput(); }
+    searchInp?.blur();
+  }
   if (e.key === 'r' || e.key === 'R') { loadGraph(); }
+  // / 键聚焦搜索框
+  if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
+    e.preventDefault();
+    document.getElementById('graph-search')?.focus();
+  }
 });
 </script>
 </body>

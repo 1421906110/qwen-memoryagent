@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── 默认配置 ──
-DEFAULT_MODEL = "deepseek-chat"           # DeepSeek
+DEFAULT_MODEL = "deepseek-v4-flash"          # DeepSeek V4
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MAX_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.1

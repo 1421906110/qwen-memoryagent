@@ -31,6 +31,10 @@ from memory_agent.agent.goal import GoalContext, GoalStatus, SubGoal
 from memory_agent.agent.reflector import SelfReflector, FixExecutor
 from memory_agent.agent.memory_manager import MemoryManager, _IMPORTANT_TRIGGERS
 
+# 🔥 v0.17: 新模块
+from memory_agent.agent.registry import ToolRegistry, tool, get_registry
+from memory_agent.agent.engine import TurnEngine, Mode, TurnResult, ToolCache
+
 logger = logging.getLogger("agent")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -51,32 +55,46 @@ _COMPLETION_MARKER = "【完成】"  # 【完成】
 # ═══════════════════════════════════════════════════════════════════════════
 _BASE_SYSTEM_PROMPT = (
     "你是小明，带长期记忆的 AI 助手。\n"
-    "## ✅ 完成标记\n"
-    "任务完成后，在回复末尾加上「【完成】」标记，让系统知道任务已完成。\n"
-    "如果还需要继续处理，不加标记直接继续就行。\n\n"
-    "## 🎭 人格（最重要）\n"
-    "- **主动推进** —— 做完一步自动检查「还需要做什么？」\n"
-    "- **主动衔接** —— 聊过的内容自然接上（单纯打招呼/问候不自动回忆）\n"
-    "- **回复简洁** —— 打招呼回「你好」或「嗨」，不分析不推理不交代背景\n"
-    "- **主动建议** —— 任务完成时提供 1-2 个延续方向\n"
-    "- **一次做对** —— 自己能推完整的任务自动推进到完成\n"
-    "- **做完验证** —— 说「好了」就是真的好了\n"
-    "- **错了认，不确定就说不知道** —— 不编不造\n"
-    "- **找根因** —— 修问题本身，不是贴创可贴\n\n"
-    "## 🚨 日期铁律（最重要）\n"
-    "关于当前日期/时间/星期/几月的问题→必须先调 shell 执行 date 命令查系统真实时间，"
-    "不能凭训练数据回答。先调 date 拿到结果，再回答。\n\n"
-    "## ⚠️ 路径\n"
-    "不能直接写 /Users/baikai/Desktop/。先保存到 /home/ecs-user/，告诉用户 scp 拉取。\n\n"
-    "## 🔍 分析\n"
-    "- 诚实批判性，不好就说不好\n"
+    "## 🎯 核心优先级\n"
+    "当目标冲突时按此判断：正确 > 诚实 > 有用 > 简洁。\n"
+    "准确比自信重要，诚实比迎合重要，实用比啰嗦重要。\n\n"
+    "## 🎭 人格\n"
+    "- **主动推进** — 做完一步自动检查「还要做什么？」，自己能推完整的直接推到完成\n"
+    "- **主动衔接** — 聊过的内容自然接上（单纯打招呼不自动回忆）\n"
+    "- **一次做对** — 动手前想清楚边界和约束，做完了验证，说「好了」就是真的好了\n"
+    "- **找根因** — 修问题本身，不是贴创可贴\n"
+    "- **错了认** — 有错直接承认纠正，不找借口不绕弯\n"
+    "- **诚实批判** — 不好就说不好，不确定就说不知道，不编不造\n"
+    "- **回复简洁** — 打招呼回「你好」或「嗨」，不分析不推理不交代背景\n"
+    "- **主动建议** — 任务完成时提供 1-2 个具体可操作的延续方向\n\n"
+    "## 🧠 分析\n"
+    "- 先理解用户的真实意图再回应，不要急着回答\n"
+    "- 复杂任务先拆解：考虑约束、依赖、边界情况、失败模式、权衡\n"
+    "- 明确区分：已知事实 / 推断 / 假设 / 不确定性\n"
+    "- 推荐时解释关键权衡，但只说结论和必要说明，不啰嗦\n"
+    "- 用户假设有误时客观指出并提供更好的方案\n"
     "- 直接说核心发现，不要表格/评分/emoji 模板\n\n"
-    "## ⛔ 禁止输出思考过程（最重要）\n"
-    "直接输出最终回复，不要输出任何内心独白、分析过程、或对用户输入的评价。\n"
-    "思考 → 直接回复，不要把思考过程写出来。\n"
-    "✅ 用户说「你好」→ 你回「你好！我是小明，有什么事吗？」\n"
-    "❌ 用户说「你好」→ 你先写「我们开始对话了，用户说你好这是打招呼……」再回「你好」\n"
-    "你在回复里写了思考过程，用户会看到，这是严重问题。\n"
+    "## 💬 回复\n"
+    "- ⛔ 禁止输出思考过程：直接输出最终回复，不要内心独白、分析过程、对用户输入的评价\n"
+    "  ✅ 用户说「你好」→ 回「你好！我是小明，有什么事吗？」\n"
+    "  ❌ 用户说「你好」→ 先写「用户打招呼了」再回「你好」——思考过程用户能看到，这是严重问题\n"
+    "- 匹配用户的语气和专业水平：代码/技术问题认真答，闲聊轻松答\n"
+    "- 回复末尾自然说一句「还要帮你做点别的吗？」或类似延续提议\n\n"
+    "## 💻 代码\n"
+    "- 生成完整、正确、可维护的代码。不要用占位符省略关键实现（除非用户明确要求）\n"
+    "- 简单健壮优先，不引入不必要的复杂度\n"
+    "- 处理重要的边界情况和错误条件\n"
+    "- 遵循项目现有约定（除非要求重构）\n\n"
+    "## ✅ 交付前检查\n"
+    "回复之前花半秒确认：\n"
+    "1. 直接回答了用户的问题\n"
+    "2. 没有自相矛盾或编造信息\n"
+    "3. 重要假设和局限已说明\n"
+    "4. 尽可能简洁但不牺牲正确性\n\n"
+    "## 🚨 铁律\n"
+    "1. 日期/时间/星期/几月 → 必须先调 shell 执行 date 命令查系统真实时间，不能凭训练数据回答\n"
+    "2. 不能直接写 /Users/baikai/Desktop/。先保存到 /home/ecs-user/，告诉用户 scp 拉取\n"
+    "3. 已完成任务在回复末尾加上「【完成】」标记。需要继续处理的不加\n"
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -175,226 +193,10 @@ class AgentContext:
 
 
 # ---------------------------------------------------------------------------
-#  Tool Registry — the heart of the agent's capabilities
+#  Tool Registry — 🔥 v0.17: 已迁移到 memory_agent.agent.registry
+#  现在通过 from memory_agent.agent import ToolRegistry 导入新版本
+#  新版本：自动 Schema 生成 + @tool 装饰器（零外部依赖）
 # ---------------------------------------------------------------------------
-
-class ToolRegistry:
-    """Registry of tools an agent can call. Each tool has:
-
-      name:        unique identifier
-      description: what it does (for LLM prompt)
-      parameters:  JSON Schema for arguments
-      executor:    callable(tool_call_id, args, context) → dict
-      type:        "builtin" | "module"
-    """
-
-    def __init__(self):
-        self._tools: dict[str, dict] = {}
-        self._categories: dict[str, list[str]] = {}  # category → [tool names]
-
-    def register(self, name: str, description: str, parameters: dict,
-                 executor: Callable, tool_type: str = "builtin",
-                 category: str = "general") -> None:
-        """Register a tool."""
-        if name in self._tools:
-            logger.warning("Tool %s already registered — overwriting", name)
-        self._tools[name] = {
-            "name": name,
-            "description": description,
-            "parameters": parameters,
-            "executor": executor,
-            "type": tool_type,
-            "category": category,
-        }
-        self._categories.setdefault(category, []).append(name)
-
-    def get(self, name: str) -> dict | None:
-        return self._tools.get(name)
-
-    def list_tools(self) -> list[dict]:
-        """Return all tool definitions for the LLM (OpenAI function calling format)."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": t["name"],
-                    "description": t["description"],
-                    "parameters": t["parameters"],
-                },
-            }
-            for t in self._tools.values()
-        ]
-
-    def list_for_ui(self) -> list[dict]:
-        """Return tools with metadata for the UI panel."""
-        return [
-            {"name": t["name"], "description": t["description"],
-             "type": t["type"], "category": t["category"]}
-            for t in self._tools.values()
-        ]
-
-    def list_by_category(self) -> dict[str, list[dict]]:
-        """Group tools by category for the UI."""
-        result = {}
-        for t in self._tools.values():
-            cat = t["category"]
-            result.setdefault(cat, []).append({
-                "name": t["name"],
-                "description": t["description"],
-                "type": t["type"],
-            })
-        return result
-
-    def execute(self, tool_call_id: str, name: str, args: dict,
-                ctx: AgentContext) -> dict:
-        """Execute a tool and return the result.
-
-        ⭐ v2.1: 自动自验证（0 Token，纯程序检查）
-        工具执行后立刻验证结果真实性，避免 LLM "打嘴炮"。
-
-        ⭐ v2.2: 前置验证器（来自 Emma Agent Firewall + Rubik 验证器）
-        工具执行前做安全验证，防止路径穿越/危险命令/内网访问。
-        """
-        tool = self._tools.get(name)
-        if not tool:
-            return {"error": f"Unknown tool: {name}"}
-
-        # ═══ 🔐 前置验证：在工具执行前检查参数安全性（0 Token） ═══
-        from memory_agent.agent.validator import validate_tool_call
-        ok, reason = validate_tool_call(name, args)
-        if not ok:
-            logger.warning("⛔ 前置验证拦截 %s: %s", name, reason)
-            return {
-                "error": f"❌ 安全验证未通过: {reason}",
-                "_verified": False,
-                "_blocked": True,
-            }
-
-        logger.info("🧰 Tool call: %s(%s)", name, json.dumps(args)[:200])
-        try:
-            result = tool["executor"](tool_call_id, args, ctx)
-            ctx.tools_called += 1
-            if tool["type"] == "module":
-                ctx.modules_used += 1
-
-            # ⭐ 自验证（0 Token, <1ms）
-            if "error" not in result:
-                try:
-                    verification = self._verify_tool_result(name, args, result)
-                    result["_verified"] = verification["passed"]
-                    if not verification["passed"] and verification.get("issues"):
-                        result["_issues"] = verification["issues"]
-                        logger.warning(
-                            "⚠️ 自验证失败: %s — %s",
-                            name, verification["issues"][0],
-                        )
-                        # 写操作失败 → 自动重试一次
-                        if verification.get("auto_retry"):
-                            logger.info("🔄 自动重试 %s ...", name)
-                            result2 = tool["executor"](tool_call_id, args, ctx)
-                            if "error" not in result2:
-                                v2 = self._verify_tool_result(name, args, result2)
-                                result2["_verified"] = v2["passed"]
-                                if not v2["passed"] and v2.get("issues"):
-                                    result2["_issues"] = v2["issues"]
-                                else:
-                                    result2["_auto_retried"] = True
-                                    if "_issues" in result2:
-                                        del result2["_issues"]
-                                return result2
-                            return {"error": f"重试失败: {result2.get('error', 'unknown')}", "_verified": False}
-                except Exception as ve:
-                    # 验证器绝不能带崩工具执行——出异常就跳过验证
-                    logger.debug("Verifier skipped (non-critical): %s", ve)
-                    result["_verified"] = True
-            else:
-                result["_verified"] = False
-
-            return result
-        except Exception as e:
-            logger.exception("Tool %s failed", name)
-            return {"error": str(e), "_verified": False}
-
-    @staticmethod
-    def _verify_tool_result(name: str, args: dict,
-                             result: dict) -> dict:
-        """⭐ 自验证：工具执行后检查结果是否真实有效。
-
-        纯程序检查（0 Token，<1ms），不调 LLM。
-        验证失败时返回 issues，LLM 看到 _verified=False 后自动重试。
-
-        Returns: {"passed": bool, "issues": list[str], "auto_retry": bool}
-        """
-        import os
-
-        issues = []
-
-        if name == "write_file":
-            path = args.get("path", "")
-            if path:
-                if not os.path.exists(path):
-                    issues.append(f"文件不存在: {path}")
-                else:
-                    size = os.path.getsize(path)
-                    if size == 0:
-                        issues.append(f"文件为空: {path}")
-            return {
-                "passed": len(issues) == 0,
-                "issues": issues,
-                "auto_retry": True,
-            }
-
-        if name == "edit_file":
-            path = args.get("path", "")
-            if path and not os.path.exists(path):
-                issues.append(f"文件不存在: {path}")
-            return {
-                "passed": len(issues) == 0,
-                "issues": issues,
-                "auto_retry": False,
-            }
-
-        if name == "shell":
-            returncode = result.get("returncode", result.get("exit_code", -1))
-            if returncode != 0:
-                stderr = result.get("stderr", "") or result.get("error", "")
-                issues.append(f"命令退出码 {returncode}: {stderr[:100]}")
-            return {
-                "passed": len(issues) == 0,
-                "issues": issues,
-                "auto_retry": False,
-            }
-
-        if name == "web_search":
-            # 实际返回用 result 或 text 或 content key
-            content = (result.get("result", "") or result.get("text", "")
-                       or result.get("content", ""))
-            if not content:
-                # 也检查 fetch 结果
-                content = result.get("fetched_page", "")
-            if not content:
-                issues.append("搜索结果为空")
-            return {
-                "passed": len(issues) == 0,
-                "issues": issues,
-                "auto_retry": False,
-            }
-
-        if name == "web_fetch":
-            content = result.get("content", "") or result.get("text", "")
-            status = result.get("status", 200)
-            if status != 200 and not content:
-                issues.append(f"HTTP {status}，无内容")
-            elif not content:
-                issues.append("抓取内容为空")
-            return {
-                "passed": len(issues) == 0,
-                "issues": issues,
-                "auto_retry": False,
-            }
-
-        # 其他工具跳过验证（信任工具返回）
-        return {"passed": True, "issues": [], "auto_retry": False}
 
 
 # ---------------------------------------------------------------------------
@@ -432,16 +234,22 @@ class Agent:
             "5. 搜到结果含URL且用户要数据 → 用 web_fetch 抓取页面拿完整数据\n"
             "6. 搜索没结果 → 换关键词再搜一次\n"
             "7. 不要模拟操作 —— 真的调工具！真的执行！\n"
-            "8. 问日期/时间/星期/几月 → 先调 shell date 再回答，不要凭记忆瞎说\n"
+            "8. 问日期/时间/星期/几月 → 用 get_current_time 获取，不要凭记忆瞎说\n"
             "9. 搜索后：如实报告搜索结果，找到什么说什么。如果内容不相关或不对，"
             "诚实说「搜索结果是XXX，不是最新的新闻」而不是「我不确定」。不要装傻。\n"
             "10. 已经调了工具还找不到 → 告诉用户实际情况，询问是否要换方式。"
-            "不要假装完成了任务。\n\n"
+            "不要假装完成了任务。\n"
+            "11. 卡住了需要用户确认 → 用 ask_user 提问，但能自己推的别问\n\n"
             "## 🧠 记忆\n"
             "5个工具：memory_recall(回想) / memory_remember(存) / memory_status(统计)\n"
             "         / memory_diagnose(🔍自检) / memory_forget(遗忘)\n"
             "- 学到用户信息（偏好/事实/决定）→ 用 memory_remember 存起来\n"
             "- 定期用 memory_diagnose 检查记忆状态\n\n"
+            "## 📋 任务管理\n"
+            "工具：todo / think\n"
+            "- 多步骤任务开始前先用 todo create 建任务列表，每做完一步更新状态\n"
+            "- 复杂问题先用 think 在内部推理拆解，再输出最终回复\n"
+            "- think 的内容用户看不到，所以不要复述思考过程\n\n"
             "## 💬 回复格式\n"
             "- 每次回复结束时，自然地说一句「还要帮你做点别的吗？」或类似的延续提议\n"
             "- 说完建议后提供具体可操作的下一步建议\n"
@@ -552,15 +360,18 @@ class Agent:
             # 超出上下文窗口导致截断或 OOM。每次迭代前检查预算。
             openai_messages = _prune_messages(openai_messages)
 
-            # ⭐ 搜索超限（最多2次）→ 移除工具，LLM 只能输出文本
-            if search_count > 2:
+            # ⭐ 搜索超限 → 限制继续搜索，但不移走所有工具定义
+            #  让 LLM 仍然可以 write_file/shell，只是不继续搜索
+            if search_count > 4:
                 if tool_defs:
-                    logger.warning("🛑 搜索超限(%d次)，移除工具定义", search_count)
+                    logger.warning("🛑 搜索超限(%d次)，移除 web_search/web_fetch", search_count)
                     openai_messages.append({
                         "role": "user",
-                        "content": "【强制停止】你已经搜索了多次。请根据已有搜索结果回复用户，禁止继续搜索。直接给出最终答案。",
+                        "content": "【停止搜索】你已经搜索多次了。请根据已有搜索结果直接回复用户。如果还需要写文件可以继续，但不要再搜索了。",
                     })
-                tool_defs = None
+                # 只移除搜索工具，保留其他工具
+                _filtered = [t for t in (tool_defs or []) if t.get("function", {}).get("name") not in ("web_search", "web_fetch")]
+                tool_defs = _filtered or None
 
             # Call LLM with tools
             # ⭐ 连续错误上限：同一工具连续失败 4 次→停止（web_fetch 降级）
@@ -744,6 +555,25 @@ class Agent:
                     logger.info("💬 Simple Q&A (no tools needed)")
                     break
 
+                # ⭐ v0.18: LLM 已调了工具但返回空文本——自动构建完成回复
+                # DeepSeek 在 tool call 后有时会返回空内容，导致无限空循环
+                if not text.strip() and not msg.tool_calls:
+                    logger.warning("🛑 LLM returned empty after %d tool(s) — auto-completing", ctx.tools_called)
+                    # 检查最近是否调了 memory_remember
+                    _had_remember = any(
+                        m.get("role") == "assistant" and any(
+                            tc.get("function", {}).get("name") == "memory_remember"
+                            for tc in m.get("tool_calls", [])
+                        )
+                        for m in openai_messages
+                        if isinstance(m, dict)
+                    )
+                    if _had_remember:
+                        text = "已记住。【完成】"
+                    else:
+                        text = "已完成。【完成】"
+                    logger.info("💬 Auto-constructed reply: %s", text[:30])
+
                 # LLM has done work — check if goal is complete
 
                 # ⭐ 拒绝写文件检测：LLM 说"我无法直接操作你的电脑"——这是错的！
@@ -891,12 +721,18 @@ class Agent:
                         logger.info("💬 Simple Q&A (no tools needed)")
                         break
                     
+                    # ⭐ v0.18: 已调过工具 + LLM 给了实质回复 → 视为完成
+                    if ctx.tools_called > 0 and len(text.strip()) > 10:
+                        final_reply = text
+                        logger.info("✅ Tool(s) done with substantive reply (no plan)")
+                        break
+
                     # ⭐ v0.16: 完成标记驱动退出
                     if self._is_complete_response(text):
                         final_reply = self._strip_completion_marker(text)
                         logger.info("✅ Task complete via marker")
                         break
-                    
+
                     # 还没完成 → 继续
                     openai_messages.append({"role": "assistant", "content": text})
                     
@@ -910,9 +746,9 @@ class Agent:
                 # 工具调用不一定成功，final_reply 为空说明 LLM 一直没给出有效回复。
                 tool_count = ctx.tools_called
                 if tool_count > 0:
+                    # ⭐ 工具确实执行了，只是 LLM 没输出最终回复 → 告知已完成
                     final_reply = (
-                        f"抱歉，我试了 {tool_count} 次没拿到结果。"
-                        "可能是网络问题或搜索服务暂时不可用，要不等会儿再试，或者换个说法？"
+                        f"已执行 {tool_count} 次操作。如果还需要什么，告诉我就好。"
                     )
                 else:
                     final_reply = "抱歉，我没能正确处理你的请求。能再说一次吗？"
@@ -1448,8 +1284,12 @@ class Agent:
         return _COMPLETION_MARKER in text
 
     def _strip_completion_marker(self, text: str) -> str:
-        """去掉完成标记。"""
-        return text.replace(_COMPLETION_MARKER, "").strip()
+        """去掉完成标记。如果去掉后为空（LLM 只回了【完成】），从上下文构建有意义回复。"""
+        stripped = text.replace(_COMPLETION_MARKER, "").strip()
+        if stripped:
+            return stripped
+        # LLM 只回了【完成】标记 → 返回一个友好的完成提示
+        return "已执行完成。"
 
     def _inject_completion_reminder(self, messages: list[dict], iteration: int) -> None:
         """连续多轮无完成标记 → 提醒 LLM。"""

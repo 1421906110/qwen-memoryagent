@@ -337,6 +337,12 @@ def check_python_repl(args: dict) -> tuple[bool, str]:
             if "os.path" in code and "os.system" not in code and "os.popen" not in code:
                 continue
             return False, f"Python REPL 不允许执行系统命令: {di}"
+    # 阻止 __import__ 绕过
+    if "__import__" in code:
+        return False, "Python REPL 不允许使用 __import__"
+    # 阻止 exec/eval/compile 执行系统命令
+    if "exec(" in code or "eval(" in code:
+        return False, "Python REPL 不允许使用 exec/eval"
     return True, ""
 
 

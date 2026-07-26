@@ -624,7 +624,18 @@ class RecallRouter:
                 "system": 1.0,              # 系统操作
                 "memory_abstraction": 0.6,  # 抽象归纳
             }
-            source_type = f.evidence[0].source if f.evidence else ""
+            source_type = "unknown"
+            if f.evidence and f.evidence[0].source:
+                ev_source = f.evidence[0].source
+                # 直接匹配已知来源类型
+                if ev_source in source_weights:
+                    source_type = ev_source
+                # 否则从 evidence 内容推断（evidence 里的 statement 可能包含线索）
+                else:
+                    for known in source_weights:
+                        if known in ev_source.lower():
+                            source_type = known
+                            break
             sw = source_weights.get(source_type, 0.5)
             s += sw * 0.10
 

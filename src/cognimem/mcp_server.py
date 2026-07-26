@@ -50,7 +50,7 @@ logger = logging.getLogger("cognimem.mcp")
 _config = {
     "llm_api_key": os.environ.get("DEEPSEEK_API_KEY", "")
                    or os.environ.get("DASHSCOPE_API_KEY", ""),
-    "llm_model": os.environ.get("QWEN_MODEL", "deepseek-chat"),
+    "llm_model": os.environ.get("QWEN_MODEL", "deepseek-v4-flash"),
 }
 
 # 尝试连接 PostgreSQL
