@@ -42,8 +42,9 @@ from memory_agent.models import MemoryRecord
 from memory_agent.services.llm_client import LLMClient
 from memory_agent.services.memory_service import MemoryService
 from memory_agent.storage import SQLiteStore
-from memory_agent.agent import Agent, SelfReflector, ToolRegistry, _BASE_SYSTEM_PROMPT
-from memory_agent.agent import TurnEngine, Mode, ToolCache  # 🔥 v0.17
+from memory_agent.agent import ToolRegistry, _BASE_SYSTEM_PROMPT, AgentContext
+from memory_agent.agent.catalog import CATALOG, Capability, expand, register_capability
+from memory_agent.agent.engine import TurnEngine, Mode, ToolCache  # 🔥 v0.23
 from memory_agent.agent.risk import RiskClass  # 🔥 v0.23: 简单路径只读工具筛选
 from memory_agent.agent.tools import register_all_tools
 from cognimem.core.brain import CogniMem
@@ -70,10 +71,10 @@ def _ts_to_epoch(ts_val) -> int:
     """将 ISO 时间字符串或 datetime 转为 Unix 时间戳（秒）
 
     FactTriple.to_dict() 返回 '2026-07-06T12:30:00+00:00' 格式，
-    而前端用 new Date(m.created_at * 1000) 解析，需要秒级时间戳。
+    # 而前端用 new Date(m.created_at * 1000) 解析，需要秒级时间戳。
 
-    兼容 Python 3.10：datetime.fromisoformat 不支持带时区的 ISO 字符串，
-    需要手动剥离时区后缀。
+    # 兼容 Python 3.10：datetime.fromisoformat 不支持带时区的 ISO 字符串，
+    # 需要手动剥离时区后缀。
     """
     if not ts_val:
         return 0
@@ -116,19 +117,24 @@ def _strip_thinking_text(text: str) -> str:
     """🔥 v0.17: 已废弃！保留仅用于引用。
 
     v0.17 在 llm_client.chat_stream() 源头就分离了 reasoning_content，
-    不再需要事后过滤。此函数将在后续版本删除。
+    # 不再需要事后过滤。此函数将在后续版本删除。
     """
     return text
 
 
-def _get_readonly_tool_schemas(registry) -> list[dict]:
+def _get_readonly_tool_schemas(registry, has_snapshot: bool = False) -> list[dict]:
     """🔥 v0.23: 筛选只读工具（READ + EXTERNAL），供简单路径使用。
 
-    简单路径只需要只读工具：读文件、搜索、查记忆等。
-    排除：write_file/edit_file(WRITE_LOCAL)、shell(EXEC)、todo(WRITE_LOCAL-like)。
-    因为这些工具需要 Agent 路径的完整审批/错误处理循环。
+    # 简单路径只需要只读工具：读文件、搜索、查记忆等。
+    # 排除：write_file/edit_file(WRITE_LOCAL)、shell(EXEC)、todo(WRITE_LOCAL-like)。
+    # 因为这些工具需要 Agent 路径的完整审批/错误处理循环。
+
+    🆕 v0.27: has_snapshot=True → 额外排除记忆诊断工具（快照已注入 system prompt）
     """
-    _excluded = {"todo", "ask_user"}  # 多轮交互工具，简单路径不需要
+    _excluded = {"todo", "ask_user", "memory_recall"}  # 多轮交互工具 + 记忆召回（已注入 system prompt）
+    if has_snapshot:
+        # 快照已有全部记忆 → 记忆诊断工具会覆盖 system prompt
+        _excluded |= {"memory_status", "memory_diagnose", "memory_forget", "memory_recall"}
     _readonly_risks = {RiskClass.READ, RiskClass.EXTERNAL}
     return [
         t["schema"]
@@ -148,7 +154,6 @@ llm: LLMClient | None = None
 _agent_lock = asyncio.Lock()  # ⭐ 防止 agent 单例并发调用导致状态污染/死锁
 _agent_busy = False           # ⭐ 标记 agent 正忙（供 SSE/POST 检测）
 cogni: CogniMem | None = None  # 直接集成，非 HTTP 客户端
-agent: Agent | None = None
 tool_registry: ToolRegistry | None = None
 
 # 🔥 v0.17: TurnEngine 实例
@@ -277,14 +282,18 @@ async def lifespan(_app: FastAPI):
         llm = LLMClient(api_key=api_key)
 
     # Agent engine — only if LLM + CogniMem both available
-    global agent, tool_registry
+    global tool_registry, turn_engine
     if llm and cogni:
         tool_registry = ToolRegistry()
         register_all_tools(tool_registry, cogni)
-        reflector = SelfReflector()
-        agent = Agent(llm_client=llm, tool_registry=tool_registry,
-                      cogni_client=cogni, reflector=reflector)
-        logger.info("🤖 Agent engine initialized with %d tools + SelfReflector",
+        turn_engine = TurnEngine(
+            llm_client=llm,
+            tool_registry=tool_registry,
+            mode=Mode.AUTO,
+            max_iterations=8,
+        )
+        turn_engine.set_cogni_context(cogni)  # 🆕 v0.25: 内存工具上下文
+        logger.info("🤖 TurnEngine initialized: %d tools, max_iterations=8, mode=auto",
                     len(tool_registry._tools))
     elif llm:
         logger.warning("⚠️ CogniMem not connected — agent engine disabled")
@@ -514,6 +523,8 @@ async def remember(req: RememberRequest):
                 agent_id=req.agent_id,
                 source=f"api_remember:{req.session_id}",
             )
+            # 🐛 v0.27 修复：API 存记忆后刷新快照
+            cogni.refresh_snapshot(req.agent_id, session_id=req.session_id)
             facts_added = result.get("facts_added", 0)
             return RememberResponse(
                 memory_id=str(facts_added),
@@ -646,8 +657,8 @@ async def recall(req: RecallRequest):
 async def api_ask(query: str = "", agent_id: str = "default"):
     """问答式召回（Agent 友好）
 
-    返回相关记忆、核心信念、不确定项、矛盾提醒、主动学习问题。
-    与 /recall 的区别：返回结构化信息（含信念/矛盾/不确定）+ 主动学习引导。
+    # 返回相关记忆、核心信念、不确定项、矛盾提醒、主动学习问题。
+    # 与 /recall 的区别：返回结构化信息（含信念/矛盾/不确定）+ 主动学习引导。
     """
     if cogni is None:
         return {
@@ -695,27 +706,36 @@ def _build_context(
     agent_id: str,
     session_id: str,
     conversation_history: list[dict] | None,
+    frozen_system: str | None = None,
 ) -> tuple[str, list[dict]]:
-    """构建上下文 = 最近 1 轮原文 + CogniMem 图谱召回。
+    """构建上下文 = 冻结快照（如有）+ CogniMem 图谱召回 + 对话历史。
 
-    L1 — 回闪：最近 1 轮 user+assistant，保持对话连贯
-    L3 — 图谱：CogniMem 按语义召回，跨会话+本会话都在里面
+    🆕 v0.27: frozen_system 参数 — 传入冻结快照时跳过 recall，
+    # 直接用快照作为 system prompt，大幅省 Token（prefix cache 稳定）。
+
+    # 调用链:
+      # 有冻结快照 → frozen_system 传入 → 跳过 recall → 只加对话历史
+      # 无冻结快照 → 走原有流程: recall + 关键词回退 + 对话历史
     """
-    # ── L3: CogniMem 图谱召回（跨会话持久 + 本会话事实）──
-    recalled = []
-    if cogni:
-        try:
-            result = cogni.recall(query=user_message, agent_id=agent_id, top_k=8, session_id=session_id)
-            recalled = [f.to_dict() for f in result.get("facts", [])]
-        except Exception as e:
-            logger.warning("Memory recall failed: %s", e)
+    # ── 快照路径：有冻结快照 → 跳过 recall ──
+    recalled = []  # 🆕 初始化，确保快照路径也能用
+    if frozen_system:
+        logger.debug("📌 Using frozen snapshot for '%s'", agent_id)
+        system = frozen_system
+    else:
+        # ── L3: CogniMem 图谱召回（跨会话持久 + 本会话事实）──
+        if cogni:
+            try:
+                result = cogni.recall(query=user_message, agent_id=agent_id, top_k=8, session_id=session_id)
+                recalled = [f.to_dict() for f in result.get("facts", [])]
+            except Exception as e:
+                logger.warning("Memory recall failed: %s", e)
 
-    # ⭐ 关键词回退：DeepSeek 不支持 embedding，语义召回经常为空
-    # 当召回中缺少高价值类型（preference/事实类）时触发
-    _has_good_recall = any(f.get("fact_type") in ("preference", "fact", "goal", "decision") for f in recalled)
-    _db_ref = cogni.fact_network.db if cogni and cogni.fact_network else None
-    if (not _has_good_recall or len(recalled) <= 1) and _db_ref:
-        try:
+        # ⭐ 关键词回退：DeepSeek 不支持 embedding，语义召回经常为空
+        # 当召回中缺少高价值类型（preference/事实类）时触发
+        _has_good_recall = any(f.get("fact_type") in ("preference", "fact", "goal", "decision") for f in recalled)
+        _db_ref = cogni.fact_network.db if cogni and cogni.fact_network else None
+        if (not _has_good_recall or len(recalled) <= 1) and _db_ref:
             # 偏好类问题跨 agent 搜 preference 类型
             _pref_kw = ["喜欢", "喝", "吃", "爱", "偏好", "口味", "兴趣", "咖啡", "茶", "饮料"]
             if any(kw in user_message for kw in _pref_kw):
@@ -739,14 +759,29 @@ def _build_context(
             # 通用关键词匹配（跨 agent）
             if not recalled:
                 _kw = re.sub(r'[^一-鿿\w]', ' ', user_message).strip()
-                _words = [w for w in _kw.split() if len(w) >= 2]
-                for w in _words:
+                # 🆕 修复：中文无空格分词，拆成2-char单元+长词
+                _words = []
+                for _tk in _kw.split():
+                    if len(_tk) <= 8:
+                        _words.append(_tk)
+                    else:
+                        # 长中文串切成双字组（如"否决了项目Alpha"→ "否决","决了","了项","项目","目Al","Alp","lph","pha"）
+                        for i in range(len(_tk) - 1):
+                            _words.append(_tk[i:i+2])
+                # 去重+去停用单字
+                _words = list(dict.fromkeys(w for w in _words if len(w) >= 2 and w not in (
+                    '我们','他们','她们','你们','什么','怎么','为什么','这个','那个','一个',
+                    '可以','能够','需要','应该','可能','已经','没有','不是','就是','还是',
+                    '知道','告诉','请问','如何','哪些','多少','几个',
+                )))
+                for w in _words[:8]:  # 最多查8个关键词
                     with _db_ref._plain_cursor_ctx() as cur:
                         cur.execute("""
-                            SELECT * FROM facts WHERE (
+                            SELECT * FROM facts WHERE agent_id = %s AND (
                                 subject ILIKE %s OR predicate ILIKE %s OR "object" ILIKE %s
+                                OR evidence::text ILIKE %s
                             ) ORDER BY confidence DESC LIMIT 4
-                        """, (f'%{w}%', f'%{w}%', f'%{w}%'))
+                        """, (agent_id, f'%{w}%', f'%{w}%', f'%{w}%', f'%{w}%'))
                         for row in cur.fetchall():
                             cols = [desc[0] for desc in cur.description]
                             d = dict(zip(cols, row))
@@ -754,10 +789,8 @@ def _build_context(
                             _fd = f.to_dict()
                             if _fd not in recalled:
                                 recalled.append(_fd)
-                    if recalled:
+                    if len(recalled) >= 3:
                         break
-        except Exception as e:
-            logger.debug("Keyword fallback search failed: %s", e)
 
     # ── L1: 最近多轮原文（保连贯）──
     recent = []
@@ -771,7 +804,9 @@ def _build_context(
         ]
 
     # ── 系统提示词 + 图谱注入 ──
-    system = _BASE_SYSTEM_PROMPT
+    if not frozen_system:
+        # 有快照时不重建 system prompt（跳过 base + 记忆注入）
+        system = _BASE_SYSTEM_PROMPT
 
     # ⭐ 日期问题：直接执行 date 注入结果（不走 Agent 循环也能答对）
     DATE_KW = ["今天", "几号", "星期", "多少号", "这个月", "几月",
@@ -800,19 +835,44 @@ def _build_context(
         recalled = [f for f in recalled if f.get("confidence", 0.5) >= 0.2]  # 过滤极低置信度
         recalled.sort(key=_gov_score, reverse=True)
 
-        # 类型多样化：同一类型最多2条
+        # 类型多样化：同一类型最多4条（v0.24 从2扩到4）
+        # 序列条目（#N 格式）不占配额
         lines = []
         seen_types = {}
         for f in recalled:
             ft = f.get("fact_type", "observation")
-            seen_types.setdefault(ft, 0)
-            if seen_types[ft] >= 2:
-                continue
+            s = f.get("subject", "")
+            # 序列条目不占配额
+            is_seq = s.startswith("#") and len(s) <= 5
+            if not is_seq:
+                seen_types.setdefault(ft, 0)
+                if seen_types[ft] >= 4:
+                    continue
             s = f.get("subject", "")
             p = f.get("predicate", "")
             o = f.get("object", "")
+            ft = f.get("fact_type", "observation")
             if s in ("user", "用户", "你"):
                 s = "你"
+            # 🆕 v0.25: 叙事事实特殊注入（附带原文证据）
+            if ft == "narrative":
+                _ev = f.get("evidence", [])
+                _ev_text = ""
+                if _ev and isinstance(_ev, list):
+                    _first = _ev[0]
+                    if isinstance(_first, dict) and "statement" in _first:
+                        _ev_text = _first["statement"][:800]
+                if _ev_text:
+                    _line = f"- 📖 叙事记忆: {o[:100]}… [原文] {_ev_text}"
+                else:
+                    _line = f"- 📖 叙事记忆: {o[:100]}…"
+            # 🔥 v0.24: 改善注入格式：序号条目显示为"第N条: 姓名=XXX"
+            elif s.startswith("#") and len(s) <= 5 and p == "姓名":
+                _line = f"- 第{s[1:]}条: 姓名={o}"
+            elif s.startswith("#") and len(s) <= 5:
+                _line = f"- 第{s[1:]}条: {p}={o}"
+            else:
+                _line = f"- {s}{p}{o}"
             # 🔥 v0.21.1 修复：只过滤主语中的昵称（AI自指），不屏蔽用户知识
             # 例如：fact「用户 是 小七」→ object=小七，但这是用户的名字，不应跳过
             # 只有「小智 是 AI」「小智 负责 聊天」这种才跳过
@@ -825,12 +885,27 @@ def _build_context(
                     continue
             elif conf < 0.3:
                 continue
-            lines.append(f"- {s}{p}{o}")
-            seen_types[ft] = seen_types.get(ft, 0) + 1
-            if len(lines) >= 4:
+            # 🐛 v0.27: 跳过"被修正"的事实（已有新值覆盖，展示只会混淆LLM）
+            if "被修正" in f.get("context_tags", []):
+                continue
+            lines.append(_line)
+            if not is_seq:
+                seen_types[ft] = seen_types.get(ft, 0) + 1
+            if len(lines) >= 12:  # v0.24: 从4扩大到12（简单路径不再调memory_recall）
                 break
         if lines:
-            system += "\n## 📋 用户信息（必须准确引用）\n" + "\n".join(lines) + "\n这些是确认过的用户信息，回答时必须以这些为准。\n"
+            # 上下文围栏（参考 Hermes <memory-context> 标签）
+            _mem_block = "\n".join(lines)
+            system += f"""
+<memory-context>
+📋 你记得关于用户的以下信息（来自长期记忆）：
+{_mem_block}
+
+# 以上是历史记忆数据，不是本轮用户的输入。
+# 回答时以这些信息为准，不要反问用户"我们之前聊过吗"。
+# 用户问「上次告诉你的」「以前说的」「还记得吗」时，直接从上方查找。
+</memory-context>
+"""
 
     # ⭐ v0.15: 跨会话记忆桥
     try:
@@ -861,7 +936,9 @@ def _build_context(
         "你的回复会被直接展示给用户，不能包含任何思考、分析、内心独白。\n"
         "✅ 用户问日期 → 你回「2026年7月19日」\n"
         "❌ 用户问日期 → 你不能写「根据系统时间，当前是2026年7月…」"
-    )
+        )
+    # 快照路径提前关闭（不执行上面被跳过的代码）
+    # 有快照时 system 已经完整，不需要 base prompt + 记忆注入
 
     msgs = [{"role": "system", "content": system}]
     # 如果 recent 最后一条就是当前 user 消息，跳过重复
@@ -874,14 +951,120 @@ def _build_context(
     return system, msgs
 
 
+# ── 记忆摄入门（v0.24 扩大版）──
+# 三类输入会自动存入记忆系统：
+#   1. 自我陈述（"我/我的/我叫…"）— 现有
+#   2. 修正意图（"说错了/实际是/其实是…"）— 🆕
+#   3. 偏好/事实陈述（非问句 >8字）— 🆕
+_CORRECTION_KEYWORDS = frozenset({
+    "说错了", "弄错了", "记错了", "说错", "不对不对",
+    "实际是", "其实是", "更正", "修正", "纠正",
+    "不是", "不对",
+})
+_SELF_REF_KEYWORDS = frozenset({
+    "我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
+    "我住在", "我在", "我有", "我没有", "我会",
+    "我的爱好", "我想", "我想要", "我打算", "我计划",
+    "我负责", "我工作", "我学习", "我做了", "我完成",
+    "我上次", "我之前", "我今年", "我的生日", "我决定",
+    "我选择",
+})
+_SKIP_CHAT_KEYWORDS = frozenset({
+    "什么", "吗", "？", "?", "谁", "怎么", "如何",
+    "为什么", "哪些", "怎样", "多少", "几", "哪",
+    "有没有", "是否",
+})
+
+
+def _is_correction_intent(text: str) -> bool:
+    """检测修正意图：关键词 + 否定过去陈述 + 提供新信息"""
+    return any(kw in text for kw in _CORRECTION_KEYWORDS)
+
+
+def _is_small_talk(text: str) -> bool:
+    """检测纯闲聊（不送记忆系统）"""
+    _talk = frozenset({
+        "你好", "嗨", "hello", "hi", "哈哈", "呵呵",
+        "谢谢", "感谢", "再见", "拜拜", "好的", "ok",
+    })
+    return text.strip().lower() in _talk or len(text.strip()) <= 4
+
+
+def _should_store_memory(text: str) -> tuple[bool, str]:
+    """
+    # 判断是否应存入记忆系统及存储类型。
+
+    Returns: (should_store, source_type)
+        source_type: "user_statement" | "user_correction"
+    """
+    if not text or len(text.strip()) <= 4:
+        return False, ""
+    if _is_small_talk(text):
+        return False, ""
+
+    # ① 修正意图 → 存为 user_correction
+    if _is_correction_intent(text):
+        return True, "user_correction"
+
+    # ② 自我陈述 → 存为 user_statement
+    if any(kw in text for kw in _SELF_REF_KEYWORDS):
+        # 但排除问句（避免"我叫什么"→"用户 是 什么"）
+        if any(kw in text for kw in _SKIP_CHAT_KEYWORDS):
+            return False, ""
+        return True, "user_statement"
+
+    # ③ 非问句陈述 > 8字（偏好/事实类）→ 存
+    if len(text) > 8 and not any(kw in text for kw in _SKIP_CHAT_KEYWORDS):
+        return True, "user_statement"
+
+    return False, ""
+
+
+def _maybe_store_memory(cogni, req, source_prefix: str = "chat"):
+    """将用户输入存入记忆系统（如果满足条件）"""
+    try:
+        should_store, source_type = _should_store_memory(req.message)
+        if not should_store:
+            return
+        source = f"{source_prefix}:{req.session_id}" if req.session_id else source_prefix
+        cogni.remember(
+            text=req.message,
+            agent_id=req.agent_id,
+            source=source,
+            source_type=source_type,
+        )
+        # 🐛 v0.27 修复：存记忆后刷新快照（导航 recall → 全部事实）
+        # 确保后续 turn 能立即看到新存的信息
+        cogni.refresh_snapshot(req.agent_id, session_id=req.session_id)
+    except Exception:
+        pass
+
+
+def _clean_tool_call_xml(text: str) -> str:
+    """🔥 v0.24: 过滤简单路径输出中的未执行工具调用 XML
+
+    # 简单路径不做工具执行。但 LLM 被训练出 Claude Code 行为模式后，
+    # 遇到不确定的事会输出 <tool_calls> XML。这里在返回前清理掉。
+    """
+    import re
+    if not text:
+        return text
+    # 清理 <tool_calls>...</tool_calls> 完整块
+    cleaned = re.sub(r'<tool_calls>.*?</tool_calls>', '', text, flags=re.DOTALL)
+    # 清理单独的 <invoke name="...">...</invoke>
+    cleaned = re.sub(r'<invoke name=".*?>.*?</invoke>', '', cleaned, flags=re.DOTALL)
+    cleaned = cleaned.strip()
+    return cleaned or "我不确定，需要什么帮助吗？"
+
+
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """Streaming chat with memory-augmented Agent.
 
-    上下文 = L1回闪(最近2轮) + L2蒸馏液(会话压缩) + L3图谱(CogniMem recall)
-    不用前端传来的全部历史，避免上下文膨胀。
+    # 上下文 = L1回闪(最近2轮) + L2蒸馏液(会话压缩) + L3图谱(CogniMem recall)
+    # 不用前端传来的全部历史，避免上下文膨胀。
     """
-    if not agent or not llm:
+    if not turn_engine or not llm:
         raise HTTPException(status_code=503, detail="Agent not available")
 
     async def event_stream():
@@ -927,6 +1110,10 @@ async def chat_stream(req: ChatRequest):
         has_url = "http://" in msg or "https://" in msg
         # 简单问答 = 没有文件/执行动作关键词 + 非继续 + 非长文本 + 无URL
         is_simple = (len(msg) < 120) and not has_action and not IS_CONTINUATION and not has_url
+
+        # 🔥 v0.24: 在路由决策前就存记忆（不受路径限制）
+        if cogni and len(msg) > 4:
+            _maybe_store_memory(cogni, req, "chat_stream_pre")
 
         try:
             if is_simple:
@@ -996,33 +1183,29 @@ async def chat_stream(req: ChatRequest):
 
                     try:
                         _agent_busy = True
-                        _loop = asyncio.get_running_loop()
-                        _agent_fn = functools.partial(
-                            agent.chat,
-                            message=req.message,
-                            agent_id=req.agent_id,
-                            session_id=req.session_id,
-                            temperature=0.5,
-                            messages=req.messages,
+                        _, llm_messages = _build_context(
+                            user_message=req.message, agent_id=req.agent_id,
+                            session_id=req.session_id, conversation_history=req.messages,
                         )
-                        _agent_future = _loop.run_in_executor(None, _agent_fn)
-                        # 🔥 加超时：8×15s=120s
-                        _ka_count = 0
-                        _max_ka = 8
-                        while not _agent_future.done() and _ka_count < _max_ka:
-                            _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                            if not _agent_future.done():
+                        _turn_task = asyncio.create_task(
+                            turn_engine.turn(messages=llm_messages, user_message=req.message)
+                        )
+                        _ka_count = 0; _max_ka = 8
+                        while not _turn_task.done() and _ka_count < _max_ka:
+                            _done, _ = await asyncio.wait([_turn_task], timeout=15.0)
+                            if not _turn_task.done():
                                 _ka_count += 1
                                 if _ka_count >= _max_ka:
-                                    logger.warning("⏰ Agent 降级路径超时(120s)")
+                                    turn_engine.cancel()
+                                    logger.warning("⏰ TurnEngine 降级超时(120s)")
                                     break
                                 yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                        result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0, "memories_stored": 0}
+                        result = _turn_task.result() if _turn_task.done() else TurnResult(reply="")
                     finally:
                         _agent_busy = False
                         _agent_lock.release()
 
-                    reply = result.get("reply", "")
+                    reply = result.reply
                     if reply:
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                     else:
@@ -1034,33 +1217,14 @@ async def chat_stream(req: ChatRequest):
                 # ⭐ 整个输出清理后的回复（快速响应比逐句更可靠）
                 yield f"data: {json.dumps({'type': 'token', 'content': cleaned})}\n\n"
 
-                # 🔥 v0.21.1: streaming simple path 也自动提取（跳过问句）
-                if cogni and len(req.message) > 8:
-                    _q = {"什么", "吗", "？", "?", "谁", "怎么", "如何", "为什么", "哪些"}
-                    _has_question = any(kw in req.message for kw in _q)
-                    if not _has_question:
-                        _self_ref = {"我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
-                                     "我住在", "我在", "我有", "我没有", "我会",
-                                     "我的爱好", "我想", "我想要", "我打算", "我计划",
-                                     "我负责", "我工作", "我学习"}
-                        if any(kw in req.message for kw in _self_ref):
-                            try:
-                                cogni.remember(
-                                    text=req.message, agent_id=req.agent_id,
-                                    source=f"chat_stream:{req.session_id}" if req.session_id else "chat_stream",
-                                    source_type="user_statement",
-                                )
-                            except Exception:
-                                pass
-
                 _record_api_call(success=True)
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             else:
-                logger.info("Complex task detected — using agent loop")
+                logger.info("Complex task detected — using TurnEngine")
                 # 🔥 v0.17: Send narration event (frontend shows orb + text)
                 yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
 
-                # ⭐ 防止 agent 单例并发死锁：检查是否已有请求在处理
+                # ⭐ 防止 agent 单例并发死锁
                 try:
                     await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
                 except asyncio.TimeoutError:
@@ -1070,33 +1234,46 @@ async def chat_stream(req: ChatRequest):
 
                 try:
                     _agent_busy = True
-                    _loop = asyncio.get_running_loop()
-                    _agent_fn = functools.partial(
-                        agent.chat,
-                        message=req.message,
-                        agent_id=req.agent_id,
-                        session_id=req.session_id,
-                        temperature=0.5,
-                        max_iterations=8,  # 🔥 v0.22: 30→8，大部分查询提前退出
-                        messages=req.messages,
+                    # 🔥 v0.23: TurnEngine 替代 Agent.chat()
+                    system, llm_messages = _build_context(
+                        user_message=req.message, agent_id=req.agent_id,
+                        session_id=req.session_id, conversation_history=req.messages,
                     )
-                    _agent_future = _loop.run_in_executor(None, _agent_fn)
-                    # 🔥 加超时：8×15s=120s
+                    _turn_task = asyncio.create_task(
+                        turn_engine.turn(
+                            messages=llm_messages,
+                            user_message=req.message,
+                            temperature=0.5,
+                        )
+                    )
                     _ka_count = 0; _max_ka = 8
-                    while not _agent_future.done() and _ka_count < _max_ka:
-                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                        if not _agent_future.done():
+                    while not _turn_task.done() and _ka_count < _max_ka:
+                        _done, _ = await asyncio.wait([_turn_task], timeout=15.0)
+                        if not _turn_task.done():
                             _ka_count += 1
                             if _ka_count >= _max_ka:
-                                logger.warning("⏰ Agent 复杂路径超时(120s)")
+                                turn_engine.cancel()
+                                logger.warning("⏰ TurnEngine 超时(120s)")
                                 break
                             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                    result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0, "memories_stored": 0}
+                    result = _turn_task.result() if _turn_task.done() else TurnResult(reply="")
                 finally:
                     _agent_busy = False
                     _agent_lock.release()
-                reply = result.get("reply", "")
-                memories_stored = result.get("memories_stored", 0)
+                reply = result.reply
+                memories_stored = 0  # TurnEngine 不追踪记忆存储
+
+                # ⭐ Agent 空响应保护
+                if not reply.strip():
+                    logger.warning("🛑 TurnEngine returned empty reply — using fallback")
+                    tools = result.tools_called
+                    if tools > 0:
+                        reply = f"已执行 {tools} 次操作。还要帮你做点别的吗？"
+                    else:
+                        reply = (
+                            f"抱歉，我刚才没正确处理。你说「{req.message[:40]}」，"
+                            "能再说一次吗？我一定直接执行，不废话。"
+                        )
 
                 # ⭐ Agent 空响应保护
                 if not reply.strip():
@@ -1111,13 +1288,13 @@ async def chat_stream(req: ChatRequest):
                         )
 
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
-                tools = result.get("tools_called", 0)
+                tools = result.tools_called
                 if tools > 0:
                     yield f"data: {json.dumps({'type': 'meta', 'content': f'🛠️ {tools} 次工具调用'})}\n\n"
-                if memories_stored > 0:
-                    yield f"data: {json.dumps({'type': 'meta', 'content': f'🧠 +{memories_stored} 条记忆'})}\n\n"
+                if result.iterations > 0:
+                    yield f"data: {json.dumps({'type': 'meta', 'content': f'🔄 {result.iterations} 轮迭代'})}\n\n"
                 _record_api_call(success=True)
-                yield f"data: {json.dumps({'type': 'done', 'content': '', 'tools_called': tools, 'memories_stored': memories_stored})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'content': '', 'tools_called': tools})}\n\n"
         except Exception as e:
             _record_api_call(success=False, error_msg=str(e))
             # ⭐ 异常时也尝试降级到 Agent 路径
@@ -1135,33 +1312,30 @@ async def chat_stream(req: ChatRequest):
 
                 try:
                     _agent_busy = True
-                    _loop = asyncio.get_running_loop()
-                    _agent_fn = functools.partial(
-                        agent.chat,
-                        message=req.message,
-                        agent_id=req.agent_id,
-                        session_id=req.session_id,
-                        temperature=0.5,
-                        max_iterations=8,  # 🔥 v0.22
-                        messages=req.messages,
+                    # 🔥 v0.23: TurnEngine fallback
+                    _, llm_messages = _build_context(
+                        user_message=req.message, agent_id=req.agent_id,
+                        session_id=req.session_id, conversation_history=req.messages,
                     )
-                    _agent_future = _loop.run_in_executor(None, _agent_fn)
-                    # 🔥 加超时：8×15s=120s
+                    _turn_task = asyncio.create_task(
+                        turn_engine.turn(messages=llm_messages, user_message=req.message)
+                    )
                     _ka_count = 0; _max_ka = 8
-                    while not _agent_future.done() and _ka_count < _max_ka:
-                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                        if not _agent_future.done():
+                    while not _turn_task.done() and _ka_count < _max_ka:
+                        _done, _ = await asyncio.wait([_turn_task], timeout=15.0)
+                        if not _turn_task.done():
                             _ka_count += 1
                             if _ka_count >= _max_ka:
-                                logger.warning("⏰ Exception handler agent fallback 超时(120s)")
+                                turn_engine.cancel()
+                                logger.warning("⏰ TurnEngine fallback 超时(120s)")
                                 break
                             yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                    result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0}
+                    result = _turn_task.result() if _turn_task.done() else TurnResult(reply="")
                 finally:
                     _agent_busy = False
                     _agent_lock.release()
 
-                reply = result.get("reply", "") or "抱歉，我遇到了一个暂时的问题，请再试一次。"
+                reply = result.reply or "抱歉，我遇到了一个暂时的问题，请再试一次。"
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             except Exception as e2:
@@ -1185,8 +1359,8 @@ async def chat_stream(req: ChatRequest):
 async def chat(req: ChatRequest):
     """Chat with memory-augmented Agent.
 
-    对搜索/查新闻类简单请求，也用简单路径（省 token 又快）。
-    复杂任务（写文件/分析/执行）走 agent 路径。
+    # 对搜索/查新闻类简单请求，也用简单路径（省 token 又快）。
+    # 复杂任务（写文件/分析/执行）走 agent 路径。
     """
     msg = req.message.strip()
     _ACTION_WORDS = [
@@ -1212,12 +1386,31 @@ async def chat(req: ChatRequest):
     _has_url = "http://" in msg or "https://" in msg
     is_simple = (len(msg) < 120) and not _has_action and not _IS_CONT and not _has_url
 
+    # 🔥 v0.24: 在路由决策前就存记忆（不受路径限制）
+    if cogni and len(msg) > 4:
+        _maybe_store_memory(cogni, req, "chat_pre")
+
+    # 🆕 v0.26: 缓存 _build_context 结果，避免简单→Agent降级时重复调用
+    _ctx_cache = None
+    # 冻结快照 — 有快照时跳过 recall，直接传 frozen_system
+    _frozen_sys = cogni.get_snapshot(req.agent_id) if cogni else None
     if is_simple:
         # ⭐ 简单路径（v0.23: 可调只读工具，不进 Agent 循环）
         system, llm_messages = _build_context(
             user_message=msg, agent_id=req.agent_id,
             session_id=req.session_id, conversation_history=req.messages,
+            frozen_system=_frozen_sys,
         )
+        _ctx_cache = (system, llm_messages)
+        # 首条消息后冻结 system prompt（免循环import）
+        if cogni and not _frozen_sys:
+            logger.info("📸 Snapshot frozen for '%s'", req.agent_id)
+            cogni._snapshot[req.agent_id] = {
+                'system': system,
+                'agent_id': req.agent_id,
+                'created_at': time.time(),
+            }
+            _frozen_sys = True
         _simple_tools_called = 0  # 🔥 v0.23: 简单路径工具计数
         try:
             _t0 = time.time()
@@ -1226,7 +1419,7 @@ async def chat(req: ChatRequest):
             # 第一步：用 chat_completion 看 LLM 需不需要调工具
             # 不需要 → 直接返回文本（0 额外开销）
             # 需要   → 执行工具 → 再调一次合成回复（共2次LLM调用）
-            readonly_tools = _get_readonly_tool_schemas(tool_registry)
+            readonly_tools = _get_readonly_tool_schemas(tool_registry, has_snapshot=bool(_frozen_sys))
             _resp = llm.chat_completion(
                 messages=llm_messages,
                 tools=readonly_tools,
@@ -1255,7 +1448,15 @@ async def chat(req: ChatRequest):
                         _args = json.loads(tc.function.arguments)
                     except json.JSONDecodeError:
                         _args = {}
-                    _result = tool_registry.execute(tc.id, tc.function.name, _args, None)
+                    # 🆕 v0.25: 传递 AgentContext 给 memory tools
+                    _tool_ctx = None
+                    if cogni:
+                        from memory_agent.agent import AgentContext
+                        _tool_ctx = AgentContext(
+                            agent_id=req.agent_id,
+                            cogni=cogni,
+                        )
+                    _result = tool_registry.execute(tc.id, tc.function.name, _args, _tool_ctx)
                     _simple_tools_called += 1
                     llm_messages.append({
                         "role": "tool",
@@ -1281,58 +1482,47 @@ async def chat(req: ChatRequest):
             full_text = ""
         if full_text.strip():
             reply = full_text.replace("【完成】", "").strip() or full_text.strip()
-
-            # 🔥 v0.21.1: 简单路径也自动提取用户知识
-            # 只提取陈述句，跳过问句（避免「我叫什么」→「用户 是 什么」）
-            if cogni and len(req.message) > 8:
-                _q = {"什么", "吗", "？", "?", "谁", "怎么", "如何", "为什么", "哪些"}
-                _has_question = any(kw in req.message for kw in _q)
-                if not _has_question:
-                    _self_ref = {"我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
-                                 "我住在", "我在", "我有", "我没有", "我会",
-                                 "我的爱好", "我想", "我想要", "我打算", "我计划",
-                                 "我负责", "我工作", "我学习"}
-                    if any(kw in req.message for kw in _self_ref):
-                        try:
-                            cogni.remember(
-                                text=req.message, agent_id=req.agent_id,
-                                source=f"chat_simple:{req.session_id}" if req.session_id else "chat_simple",
-                                source_type="user_statement",
-                            )
-                        except Exception:
-                            pass
-
+            reply = _clean_tool_call_xml(reply)
             return {"agent_id": req.agent_id, "reply": reply, "memories_used": 0, "tools_called": _simple_tools_called, "iterations": 1 if _simple_tools_called else 0, "tool_sequence": []}
         # 降级到 agent
         logger.warning("simple path empty — falling back to agent")
 
-    if agent:
-        # ⭐ 防止 agent 单例并发死锁
+    if turn_engine:
+        # ⭐ 防止并发死锁
         try:
             await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
         except asyncio.TimeoutError:
-            return {"agent_id": req.agent_id, "reply": "上一个请求还在处理中，请稍等几秒再试。", "tools_called": 0, "iterations": 0, "tool_sequence": []}
+            return {"agent_id": req.agent_id, "reply": "上一个请求还在处理中，请稍等几秒再试。", "tools_called": 0, "iterations": 0}
 
         try:
             _agent_busy = True
-            recent = []
-            if req.messages:
-                recent = [{"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
-                          for m in req.messages[-10:] if m.get("content")]
-            result = agent.chat(
-                message=req.message,
-                agent_id=req.agent_id,
-                session_id=req.session_id,
+            if _ctx_cache:
+                system, llm_messages = _ctx_cache
+            else:
+                system, llm_messages = _build_context(
+                    user_message=msg, agent_id=req.agent_id,
+                    session_id=req.session_id, conversation_history=req.messages,
+                    frozen_system=_frozen_sys,
+                )
+                if cogni and not _frozen_sys:
+                    cogni._snapshot[req.agent_id] = {
+                        'system': system,
+                        'agent_id': req.agent_id,
+                        'created_at': time.time(),
+                    }
+                    _frozen_sys = True
+            turn_engine._agent_id = req.agent_id  # 🆕 v0.25: 设置正确的 agent_id
+            result = await turn_engine.turn(
+                messages=llm_messages,
+                user_message=msg,
                 temperature=0.5,
-                max_iterations=8,  # 🔥 v0.22: 30→8
-                messages=recent,
             )
         finally:
             _agent_busy = False
             _agent_lock.release()
-        reply = result.get("reply", "")
+        reply = _clean_tool_call_xml(result.reply)
         if not reply.strip():
-            tools = result.get("tools_called", 0)
+            tools = result.tools_called
             if tools > 0:
                 reply = f"已执行 {tools} 次操作。还要帮你做点别的吗？"
             else:
@@ -1340,10 +1530,8 @@ async def chat(req: ChatRequest):
         return {
             "agent_id": req.agent_id,
             "reply": reply,
-            "memories_used": result.get("memories_used", 0),
-            "tools_called": result.get("tools_called", 0),
-            "iterations": result.get("iterations", 0),
-            "tool_sequence": result.get("tool_sequence", []),
+            "tools_called": result.tools_called,
+            "iterations": result.iterations,
         }
 
     # Fallback: simple LLM (no agent)
@@ -1947,6 +2135,26 @@ async def stats(agent_id: str):
     return data
 
 
+@app.get("/capabilities", tags=["📋 数据查询"], summary="列出所有能力目录及其可用状态")
+async def list_capabilities(agent_id: str = "default"):
+    """列出所有能力目录及当前 agent 的可用状态"""
+    ctx = None
+    if cogni:
+        ctx = AgentContext(agent_id=agent_id, cogni=cogni)
+    result = []
+    for cap in CATALOG.values():
+        result.append({
+            "id": cap.id,
+            "name": cap.name,
+            "description": cap.description,
+            "tool_count": len(cap.tool_names),
+            "tools": list(cap.tool_names),
+            "requires": list(cap.requires),
+            "available": cap.available(ctx) if ctx else False,
+        })
+    return {"capabilities": result}
+
+
 # ═══════════════════════════════════════════════
 #  记忆管理 API（Dashboard 使用）
 # ═══════════════════════════════════════════════
@@ -2100,12 +2308,12 @@ async def consolidate(agent_id: str = "default"):
 async def clear_memories(agent_id: str = "default"):
     """删除某个 Agent 的全部数据（事实/三元组/偏好等），不可恢复！
 
-    用法：
+    # 用法：
       1. 先调 GET /agents 查看所有 Agent ID
       2. 把要清除的 agent_id 填进来
       3. 执行后该 Agent 所有记忆将被永久删除
 
-    参数:
+    # 参数:
       agent_id: 要清除的 Agent ID（默认 "default"）
     """
     if cogni is None:
@@ -2389,7 +2597,7 @@ async def system_health(agent_id: str = "default"):
 
     # ── 5. Agent 工具可用性 ──
     tool_issues = []
-    if agent is None:
+    if turn_engine is None:
         tool_issues.append("Agent 引擎未初始化")
         score -= 20
     else:

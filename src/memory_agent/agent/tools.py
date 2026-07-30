@@ -605,6 +605,8 @@ def tool_memory_remember(tool_call_id: str, args: dict,
             agent_id=ctx.agent_id,
             source=f"agent_tool:{ctx.session_id}",
         )
+        # 🐛 v0.27 修复：Agent 工具存记忆后刷新快照
+        ctx.cogni.refresh_snapshot(ctx.agent_id, session_id=ctx.session_id)
         return {
             "stored": True,
             "facts_added": result.get("facts_added", 0),

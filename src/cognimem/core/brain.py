@@ -12,6 +12,7 @@ CogniMem 大脑 — 核心编排器
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 from .models import FactTriple, EvidenceItem, Contradiction
@@ -59,6 +60,56 @@ class CogniMem:
 
         self.fact_network = FactNetwork(db_adapter, config)
         self.recall_router = RecallRouter(self.fact_network)
+
+        # 🆕 v0.27: 冻结快照 — 会话启动时冻结，整轮不动（Hermes借鉴）
+        self._snapshot = {}  # {agent_id: {"system": str, "agent_id": str, "created_at": float}}
+
+    def freeze_snapshot(self, agent_id: str = "default",
+                        user_message: str = "",
+                        session_id: str = "") -> str | None:
+        """生成并冻结当前记忆快照。返回冻结的 system prompt 文本。
+
+        Hermes 思路：会话启动时一次性加载记忆 → prefix cache 稳定。
+        SPO 管简单事实 + 快照管整体上下文。
+
+        🐛 v0.27 修复：空 query 触发导航 recall（返回全部事实），
+        而非仅当前消息相关的片段。避免快照重建后丢失其他记忆。
+        """
+        from memory_agent.main import _build_context
+        try:
+            system, llm_messages = _build_context(
+                user_message="",  # 空 query → 导航 recall → 返回全部事实
+                agent_id=agent_id,
+                session_id=session_id,
+                conversation_history=[],
+            )
+            self._snapshot[agent_id] = {
+                "system": system,
+                "agent_id": agent_id,
+                "created_at": time.time(),
+            }
+            return system
+        except Exception as e:
+            logger.warning("freeze_snapshot failed: %s", e)
+            return None
+
+    def get_snapshot(self, agent_id: str = "default") -> str | None:
+        """获取当前 agent 的冻结快照。不存在或过期返回 None。"""
+        snap = self._snapshot.get(agent_id)
+        if snap is None:
+            return None
+        return snap.get("system")
+
+    def refresh_snapshot(self, agent_id: str = "default",
+                         user_message: str = "",
+                         session_id: str = "") -> str | None:
+        """主动刷新快照（LLM memory_remember 后调用）。"""
+        self._snapshot.pop(agent_id, None)
+        return self.freeze_snapshot(agent_id, user_message, session_id)
+
+    def has_snapshot(self, agent_id: str = "default") -> bool:
+        """检查是否有有效快照。"""
+        return agent_id in self._snapshot
 
     # ── 写入 ──
 
@@ -163,8 +214,173 @@ class CogniMem:
                 evidence=[EvidenceItem(source=source or "unknown", statement=text[:300])],
             ))
 
+        # 🆕 v0.25: 紧急指令/核心规则 高优先级标记
+        # 防止被大量无关对话冲刷出STM
+        _priority_keywords = {"紧急指令", "核心", "必须记住", "第一优先级", "最重要",
+                             "优先提醒", "不能忘", "一定记住"}
+        if any(kw in text for kw in _priority_keywords):
+            for f in facts:
+                f.importance = max(f.importance, 0.95)
+                f.confidence = max(f.confidence, 0.85)
+                if "优先" not in f.context_tags:
+                    f.context_tags = list(f.context_tags) + ["优先"]
+            logger.info("🔴 紧急指令标记: importance=0.95")
+
+        # 🔥 v0.24: 修正处理 — source_type="user_correction" 时自动覆盖旧事实
+        if source_type == "user_correction":
+            for f in facts:
+                if "修正" not in f.context_tags:
+                    f.context_tags = list(f.context_tags) + ["修正"]
+                f.confidence = max(f.confidence, 0.8)  # 修正事实高置信度
+
+            # 🔍 查找可覆盖的旧事实：先精确再模糊
+            for f in facts:
+                if not f.subject or not f.predicate:
+                    continue
+
+                # ① 精确匹配：同subject + 同predicate
+                candidates = self.fact_network.recall_by_triple(
+                    f.subject, f.predicate, agent_id
+                )
+                # ② 模糊搜索：遍历agent所有事实，找主题匹配的
+                # 修正场景下，新值（"6月10日"）不可能出现在旧事实里
+                # 所以改成按主题词搜索：从predicate/evidence提主题词
+                _topic_words = set()
+                # 从新事实predicate提： "日期是" → ["日期"]
+                for w in ["生日", "日期", "名字", "年龄", "电话", "工作", "公司"]:
+                    if w in f.predicate or w in f.object:
+                        _topic_words.add(w)
+                # 从修正文本提
+                for ev in f.evidence:
+                    if isinstance(ev, EvidenceItem):
+                        _txt = ev.statement or ""
+                        for w in ["生日", "日期", "名字", "年龄", "电话", "工作", "公司"]:
+                            if w in _txt:
+                                _topic_words.add(w)
+
+                all_facts = self.fact_network._get_agent_facts(agent_id)
+                for old in all_facts:
+                    if old.fact_id == f.fact_id:
+                        continue
+                    # subject 归一化后比较
+                    _old_subj_norm = "用户" if old.subject in ("我", "你", "您", "user") else old.subject
+                    _f_subj_norm = "用户" if f.subject in ("我", "你", "您", "user") else f.subject
+                    if _old_subj_norm != _f_subj_norm:
+                        continue
+                    # 匹配主题词
+                    _matched = False
+                    for tw in _topic_words:
+                        if tw in old.predicate or tw in old.object:
+                            _matched = True
+                            break
+                        for ev in old.evidence:
+                            if isinstance(ev, EvidenceItem) and tw in (ev.statement or ""):
+                                _matched = True
+                                break
+                        if _matched:
+                            break
+                    if _matched:
+                        candidates.append(old)
+                        continue
+                    # 日期模式匹配：predicate含"月"和"日" → 日期相关的事实
+                    if "月" in old.predicate and "日" in old.predicate:
+                        candidates.append(old)
+                        continue
+                    # 被修正标记的事实也加入
+                    if "被修正" in old.context_tags:
+                        candidates.append(old)
+
+                for old in candidates:
+                    if old.fact_id == f.fact_id:
+                        continue
+                    if old.object == f.object:
+                        continue  # 相同值不是修正
+                    # 旧事实降置信度（被修正了）
+                    old.confidence = min(old.confidence, 0.3)
+                    old.importance = max(old.importance * 0.5, 0.1)
+                    if "被修正" not in old.context_tags:
+                        old.context_tags = list(old.context_tags) + ["被修正"]
+                    if f.fact_id not in old.connected_facts:
+                        old.connected_facts.append(f.fact_id)
+
+                    # 🔥 继承旧事实的关键词到新事实（保证召回能找到）
+                    for tag in old.context_tags:
+                        if tag not in f.context_tags and tag not in ("被修正", "修正"):
+                            f.context_tags = list(f.context_tags) + [tag]
+                    # 也把旧事实的 predicate 关键词加进去
+                    _old_pred_words = old.predicate.replace("生日", "").replace("日期", "")
+                    if _old_pred_words and _old_pred_words not in f.context_tags:
+                        f.context_tags = list(f.context_tags) + [_old_pred_words]
+                    # 从旧事实evidence中提取主题词（"我的生日是5月10日"→"生日"）
+                    for ev in old.evidence:
+                        if isinstance(ev, EvidenceItem) and ev.statement:
+                            _topic_words = [w for w in ["生日","名字","年龄","电话","地址","工作","公司","学校"] if w in ev.statement]
+                            for tw in _topic_words:
+                                if tw not in f.context_tags:
+                                    f.context_tags = list(f.context_tags) + [tw]
+
+                    # 🔥 继承旧事实的精确谓词（"日期是"→"生日是"）
+                    # 旧事实的predicate更具体时使用
+                    _old_pred_clean = old.predicate.replace("生日", "").replace("日期", "").strip()
+                    _new_pred_clean = f.predicate.replace("生日", "").replace("日期", "").strip()
+                    if len(_old_pred_clean) < len(_new_pred_clean) or ("生日" in old.predicate and "生日" not in f.predicate):
+                        f.predicate = old.predicate
+                        logger.info("🔄 谓词继承: %s → %s", _new_pred_clean, f.predicate)
+                    self.fact_network._cache_put(old)
+                    if self.fact_network.db:
+                        try:
+                            self.fact_network.db.update_fact(old)
+                        except Exception:
+                            pass
+                    logger.info(
+                        "🔄 修正覆盖: (%s, %s, %s) 降权旧事实 (%s, %s, %s)",
+                        f.subject, f.predicate, f.object,
+                        old.subject, old.predicate, old.object,
+                    )
+
+        # 🐛 v0.27 修复: 隐式修正检测 — 同(subject, predicate)不同object
+        # 用户说"我叫测试用户"应覆盖"我叫张三"，不需要显式"实际是"关键词
+        if source_type not in ("user_correction",):
+            for f in facts:
+                if f.fact_type not in ("fact", "preference", "goal"):
+                    continue
+                if not f.subject or not f.predicate:
+                    continue
+                old_facts = self.fact_network.recall_by_triple(f.subject, f.predicate, agent_id)
+                for old in old_facts:
+                    if old.fact_id == f.fact_id or old.fact_id in [x.fact_id for x in facts]:
+                        continue
+                    if old.object == f.object:
+                        continue
+                    if old.confidence < 0.3 or f.confidence < 0.5:
+                        continue
+                    if "被修正" not in old.context_tags:
+                        old.context_tags = list(old.context_tags) + ["被修正"]
+                    old.confidence = min(old.confidence, 0.3)
+                    if "修正" not in f.context_tags:
+                        f.context_tags = list(f.context_tags) + ["修正"]
+                    f.confidence = max(f.confidence, 0.75)
+                    self.fact_network._cache_put(old)
+                    if self.fact_network.db:
+                        try:
+                            self.fact_network.db.update_fact(old)
+                        except Exception:
+                            pass
+                    logger.info(
+                        "🔄 隐式修正: (%s, %s, %s) 覆盖 (%s, %s, %s)",
+                        f.subject, f.predicate, f.object,
+                        old.subject, old.predicate, old.object,
+                    )
+
         # 3. 批量添加 (含矛盾检测 + 来源权重)
         results = self.fact_network.batch_add(facts, agent_id, source_type)
+
+        # 🆕 v0.25: 叙事跨会话链接
+        # 如果新事实中包含叙事类型，与已有的叙事事实建立 connected_facts
+        try:
+            self._link_narratives(agent_id, facts)
+        except Exception as e:
+            logger.warning("叙事链接失败: %s", e)
 
         # 3. 检查是否有矛盾
         contradictions = [
@@ -542,6 +758,92 @@ class CogniMem:
         if found:
             logger.info("🔍 矛盾扫描: 发现 %d 条新矛盾", found)
         return found
+
+    # ═══════════════════════════════════════════════════════════════
+    # ★ v0.25: 叙事跨会话链接
+    # ═══════════════════════════════════════════════════════════════
+
+    def _link_narratives(self, agent_id: str, new_facts: list):
+        """
+        新存储的叙事事实与已有叙事事实建立 connected_facts。
+
+        跨会话叙事链接：第1章"王磊" → 第3章"同样有王磊" → 建链
+        这样 recall 时通过 connected_facts 能找回所有关联章节。
+        """
+        new_narratives = [f for f in new_facts if f.fact_type == "narrative"]
+        if not new_narratives:
+            return
+
+        all_facts = self.fact_network._get_agent_facts(agent_id)
+        existing_narratives = [f for f in all_facts
+                               if f.fact_type == "narrative"
+                               and f.fact_id not in {nf.fact_id for nf in new_narratives}]
+        if not existing_narratives:
+            return
+
+        linked = 0
+        _SKIP_TAGS = frozenset({"长文本", "长文本摘要", "叙事", "情感", "positive", "negative"})
+
+        for new_n in new_narratives:
+            new_tags = set(t for t in new_n.context_tags if t not in _SKIP_TAGS)
+            # 从 evidence 中提取实体词用于匹配
+            _new_ev_text = ""
+            for ev in new_n.evidence:
+                if isinstance(ev, EvidenceItem):
+                    _new_ev_text += (ev.statement or "") + " "
+
+            for old in existing_narratives:
+                old_tags = set(t for t in old.context_tags if t not in _SKIP_TAGS)
+                shared = new_tags & old_tags
+
+                # 证据文本中的共享实体匹配
+                if not shared:
+                    _old_ev_text = ""
+                    for ev in old.evidence:
+                        if isinstance(ev, EvidenceItem):
+                            _old_ev_text += (ev.statement or "") + " "
+                    # 提取两个叙事中都出现的中文双字组实体（如"王磊"）
+                    import re as _re
+                    _words_new = set(_re.findall(r'[一-鿿]{2}', _new_ev_text))
+                    _words_old = set(_re.findall(r'[一-鿿]{2}', _old_ev_text))
+                    _common = _words_new & _words_old
+                    # 过滤常用虚词
+                    _skip_words = frozenset({
+                        "一个", "没有", "我们", "他们", "自己", "这个", "那个", "什么",
+                        "怎么", "可以", "知道", "就是", "不是", "但是", "因为", "所以",
+                        "时候", "突然", "然后", "起来", "出现", "发现", "看见", "听到",
+                        "觉得", "感觉", "开口", "询问", "回答", "离开", "走进", "走出",
+                        "先生", "小姐", "女士", "对方", "眼前", "时代", "这封", "一天",
+                        "再次", "继续", "终于", "开始", "一直", "一起", "下面", "上面",
+                    })
+                    _common = {w for w in _common if w not in _skip_words}
+                    # 优先选 2 字的人名风格实体
+                    _candidates = sorted(_common, key=lambda w: len(w))
+                    if _candidates:
+                        shared = {_candidates[0]}
+
+                if shared:
+                    tag = next(iter(shared))
+                    if new_n.fact_id not in old.connected_facts:
+                        old.connected_facts = list(old.connected_facts) + [new_n.fact_id]
+                        self.fact_network._cache_put(old)
+                    if old.fact_id not in new_n.connected_facts:
+                        new_n.connected_facts = list(new_n.connected_facts) + [old.fact_id]
+                        self.fact_network._cache_put(new_n)
+                    linked += 1
+                    logger.info("🔗 叙事链接: %s ↔ %s 共享=%s",
+                                new_n.fact_id[:8], old.fact_id[:8], tag)
+
+        if linked:
+            # 同步到 DB
+            db = getattr(self.fact_network, 'db', None)
+            if db:
+                for f in new_narratives + existing_narratives:
+                    try:
+                        db.update_fact(f)
+                    except Exception:
+                        pass
+            logger.info("🔗 叙事跨会话链接完成: %d 条链接", linked)
 
     # ═══════════════════════════════════════════════════════════════
     # ★ P1-3: 知识库模块（MIRIX Knowledge Vault 启发）
