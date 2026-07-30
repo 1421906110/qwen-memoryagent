@@ -180,7 +180,7 @@ class TurnEngine:
         mode: Mode = Mode.INTERACTIVE,
         approver: Optional[Approver] = None,
         narrator: Optional[Narrator] = None,
-        max_iterations: int = 8,  # 🔥 比 OpenWorker 的 12 更保守
+        max_iterations: int = 5,  # 🔥 5轮上限：平衡质量与速度
         tool_cache: Optional[ToolCache] = None,
     ):
         """
@@ -364,27 +364,54 @@ class TurnEngine:
         )
 
     async def _check_permission(self, tool_name: str, args: dict) -> bool:
-        """权限检查
+        """权限检查 — 基于 RiskClass 风险分级
 
-        🔥 相对优化（vs OpenWorker 前端弹窗）：
-        - 对话式审批：返回 "deny" 时，TurnEngine 自动追加询问消息到对话
-        - 不需要前端弹窗，利用已有 chat 接口
+        对标 OpenWorker 的 `coworker/permissions.py: PermissionEngine.evaluate()`：
+
+        ┌───────────────┬──────────┬──────────┬──────────┐
+        │ RiskClass     │ DISCUSS  │ INTERACT │ AUTO     │
+        ├───────────────┼──────────┼──────────┼──────────┤
+        │ READ          │ ✅ 允许  │ ✅ 允许  │ ✅ 允许  │
+        │ WRITE_LOCAL   │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        │ EXEC          │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        │ EXTERNAL      │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        └───────────────┴──────────┴──────────┴──────────┘
+
+        🔥 对话式审批（vs OpenWorker 前端弹窗）：
+        - 返回 DENY 时，调用者追加询问消息到对话
+        - 不需要前端弹窗，利用已有 chat 接口做审批
         """
+        from .risk import classify as _classify_risk, is_consequential, RiskClass
+
+        risk = _classify_risk(tool_name)
+
+        # AUTO 模式：全部放权
         if self.mode == Mode.AUTO:
             return True
 
+        # DISCUSS 模式：只允许 READ 风险的工具
         if self.mode == Mode.DISCUSS:
-            # 讨论模式：只允许读工具
-            read_tools = {"web_search", "web_fetch", "read_file", "list_dir",
-                          "memory_recall", "memory_status", "memory_diagnose"}
-            return tool_name in read_tools
+            return risk == RiskClass.READ
 
-        # INTERACTIVE 模式：调审批回调
+        # INTERACTIVE 模式：READ 自动允许，其余需审批
+        if not is_consequential(risk):
+            return True
+
+        # EXEC 工具额外检测 shell 操作符（安全加固）
+        if risk == RiskClass.EXEC and tool_name == "shell":
+            command = str(args.get("command", ""))
+            from .risk import has_shell_operators as _has_ops
+            if _has_ops(command):
+                logger.warning("⛔ Shell操作符拦截: %s", command[:80])
+                return False  # 含 ; & | > 等操作符 → 拒绝
+
+        # 调审批回调
         if self.approver:
             outcome = await self.approver(tool_name, args)
             return outcome == ApprovalOutcome.ONCE
 
-        return True
+        # 无审批回调 → 默认拒绝
+        return False
 
     @property
     def cache_stats(self) -> dict:

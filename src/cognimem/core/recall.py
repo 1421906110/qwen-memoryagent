@@ -418,10 +418,12 @@ class RecallRouter:
             return []
 
         # 预处理：所有文档文本 + 统计
-        docs = [
-            f"{f.subject} {f.predicate} {f.object}"
-            for f in agent_facts
-        ]
+        # 🔥 v0.21.1: 加入 evidence 原文，让「我叫小七」的原文能被「你叫什么名字」检索到
+        docs = []
+        for f in agent_facts:
+            _text = f"{f.subject} {f.predicate} {f.object}"
+            _ev = " ".join(ev.statement for ev in f.evidence if ev.statement) if f.evidence else ""
+            docs.append(f"{_text} {_ev}" if _ev else _text)
         N = len(docs)
         avg_dl = sum(len(self._tokenize(d)) for d in docs) / max(N, 1)
         doc_freqs: dict[str, int] = {}
@@ -658,13 +660,34 @@ class RecallRouter:
             if f.fact_id in stm_ids:
                 s += 0.05
 
+            # 🔥 v0.21.1 ⑩ Action 事实降权（核心修复！）
+            # 如果查询不涉及动作/操作/命令，action 事实不应占据召回结果
+            if f.fact_type == "action" and q:
+                _action_kw = {"做了什么", "操作", "命令", "执行", "搜索", "创建",
+                              "修改", "删除", "运行", "历史", "上次", "之前做了什么",
+                              "action", "tool", "shell", "run", "exec", "command"}
+                if not any(kw in q for kw in _action_kw):
+                    s *= 0.2  # 非 action 查询时，action 得分砍到 20%
+
             return s
 
         # ★ P1-3: 知识库过滤 — 普通召回不返回 credential 类型的事实
         facts = [f for f in facts if f.fact_type != "credential"]
 
         facts.sort(key=score, reverse=True)
-        return facts[:top_k]
+        trimmed = facts[:top_k]
+
+        # 🔥 v0.21.1 非 action 保底：如果 top_k 全是 action 且存在非 action 事实，
+        # 至少保留 1 条非 action 事实（不然用户感觉系统完全没有记忆）
+        if q and trimmed and all(f.fact_type == "action" for f in trimmed):
+            non_action = [f for f in facts if f.fact_type != "action"]
+            if non_action:
+                # 替换最后一条 action 为最佳非 action 事实
+                trimmed[-1] = non_action[0]
+                # 重新按得分排序
+                trimmed.sort(key=score, reverse=True)
+
+        return trimmed
 
     def get_stats(self) -> dict:
         """获取路由命中统计"""

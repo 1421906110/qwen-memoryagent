@@ -29,7 +29,7 @@ if _env_path.exists():
                 k, v = _line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip())
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -44,6 +44,7 @@ from memory_agent.services.memory_service import MemoryService
 from memory_agent.storage import SQLiteStore
 from memory_agent.agent import Agent, SelfReflector, ToolRegistry, _BASE_SYSTEM_PROMPT
 from memory_agent.agent import TurnEngine, Mode, ToolCache  # 🔥 v0.17
+from memory_agent.agent.risk import RiskClass  # 🔥 v0.23: 简单路径只读工具筛选
 from memory_agent.agent.tools import register_all_tools
 from cognimem.core.brain import CogniMem
 from cognimem.core.db import DatabaseAdapter
@@ -120,6 +121,23 @@ def _strip_thinking_text(text: str) -> str:
     return text
 
 
+def _get_readonly_tool_schemas(registry) -> list[dict]:
+    """🔥 v0.23: 筛选只读工具（READ + EXTERNAL），供简单路径使用。
+
+    简单路径只需要只读工具：读文件、搜索、查记忆等。
+    排除：write_file/edit_file(WRITE_LOCAL)、shell(EXEC)、todo(WRITE_LOCAL-like)。
+    因为这些工具需要 Agent 路径的完整审批/错误处理循环。
+    """
+    _excluded = {"todo", "ask_user"}  # 多轮交互工具，简单路径不需要
+    _readonly_risks = {RiskClass.READ, RiskClass.EXTERNAL}
+    return [
+        t["schema"]
+        for t in registry._tools.values()
+        if RiskClass(t.get("risk_level", "read")) in _readonly_risks
+        and t["name"] not in _excluded
+    ]
+
+
 # ---------------------------------------------------------------------------
 #  Globals (initialised in lifespan)
 # ---------------------------------------------------------------------------
@@ -127,12 +145,17 @@ def _strip_thinking_text(text: str) -> str:
 store: SQLiteStore | None = None
 memory_service: MemoryService | None = None
 llm: LLMClient | None = None
+_agent_lock = asyncio.Lock()  # ⭐ 防止 agent 单例并发调用导致状态污染/死锁
+_agent_busy = False           # ⭐ 标记 agent 正忙（供 SSE/POST 检测）
 cogni: CogniMem | None = None  # 直接集成，非 HTTP 客户端
 agent: Agent | None = None
 tool_registry: ToolRegistry | None = None
 
 # 🔥 v0.17: TurnEngine 实例
 turn_engine: TurnEngine | None = None
+
+# 🔥 v0.21: 后台记忆维护调度器
+scheduler: BackgroundScheduler | None = None
 
 
 # 🔥 v0.17: Narration → Orbs 状态映射（前端用）
@@ -283,7 +306,24 @@ async def lifespan(_app: FastAPI):
         logger.warning("🚀 启动检查: 部分失败（系统以降级模式运行）")
 
     _HEALTH["start_time"] = time.time()
+
+    # ── 🔥 v0.21: 启动后台记忆维护调度器 ──
+    global scheduler
+    if cogni is not None:
+        scheduler = BackgroundScheduler(
+            cogni=cogni,
+            tick_seconds=300,  # 5 分钟
+            llm_client=llm,   # 启用子 Agent 矛盾自动解析
+        )
+        scheduler.start()
+        logger.info("⏰ 后台记忆调度器已启动 (tick=300s)")
+
     yield
+
+    # ── 🔥 v0.21: 停止后台调度器 ──
+    if scheduler is not None:
+        await scheduler.stop()
+        logger.info("⏰ 后台记忆调度器已停止")
 
 
 app = FastAPI(
@@ -346,6 +386,12 @@ if STATIC_DIR.exists():
 
 # 🔥 v0.17: Webhook 连接器（冷启动）
 from memory_agent.connectors.handler import router as webhook_router
+
+# 🔥 v0.21: 后台记忆维护调度器（定时 groom + consolidate）
+from memory_agent.agent.scheduler import BackgroundScheduler
+
+# 🔥 v0.21: 事实验证子 Agent（矛盾自动解析）
+from memory_agent.agent.subagent import FactVerifier
 app.include_router(webhook_router)
 
 
@@ -380,12 +426,14 @@ def read_html(name: str) -> str:
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index():
-    return read_html("chat.html")
+    html = read_html("chat.html")
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/chat", response_class=HTMLResponse, include_in_schema=False)
 async def chat_page():
-    return read_html("chat.html")
+    html = read_html("chat.html")
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
@@ -494,6 +542,36 @@ async def remember(req: RememberRequest):
         memory_type=mem.memory_type,
         confidence=mem.confidence,
     )
+
+
+@app.post("/upload")
+async def upload_file(agent_id: str = "default", file: UploadFile = File(...)):
+    """上传文件到服务器。Agent 后续可以读取和处理。"""
+    upload_dir = Path(f"/home/ecs-user/uploads/{agent_id}")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+    if not safe_name:
+        safe_name = f"upload_{int(time.time())}"
+    dest = upload_dir / safe_name
+    try:
+        content = await file.read()
+        # 检查文件大小上限 (10MB)
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="文件超过 10MB 上限")
+        dest.write_bytes(content)
+        logger.info("📎 文件上传: %s (%d bytes, agent=%s)", dest, len(content), agent_id)
+        return {
+            "filename": safe_name,
+            "path": str(dest),
+            "size": len(content),
+            "agent_id": agent_id,
+            "message": f"文件已上传到 {dest}，Agent 可以读取和处理。",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("文件上传失败: %s", e)
+        raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
 
 @app.post("/recall")
@@ -735,7 +813,10 @@ def _build_context(
             o = f.get("object", "")
             if s in ("user", "用户", "你"):
                 s = "你"
-            if any(kw in (p + o) for kw in ["小七", "小智", "小可爱"]):
+            # 🔥 v0.21.1 修复：只过滤主语中的昵称（AI自指），不屏蔽用户知识
+            # 例如：fact「用户 是 小七」→ object=小七，但这是用户的名字，不应跳过
+            # 只有「小智 是 AI」「小智 负责 聊天」这种才跳过
+            if any(kw in s for kw in ["小七", "小智", "小可爱"]):
                 continue
             conf = f.get("confidence", 0.5)
             # preference 类型放宽阈值（可能被衰减了但仍有价值）
@@ -749,7 +830,7 @@ def _build_context(
             if len(lines) >= 4:
                 break
         if lines:
-            system += "\U0001f9e0 我记得\n" + "\n".join(lines) + "\n"
+            system += "\n## 📋 用户信息（必须准确引用）\n" + "\n".join(lines) + "\n这些是确认过的用户信息，回答时必须以这些为准。\n"
 
     # ⭐ v0.15: 跨会话记忆桥
     try:
@@ -816,22 +897,36 @@ async def chat_stream(req: ChatRequest):
         msg = req.message.strip()
         ACTION_WORDS = [
             "爬", "下载", "读取",
-            "写入", "编辑", "创建", "写", "生成",
-            "改", "删", "跑", "试", "调用", "执行", "运行", "安装",
-            "分析", "对比",
+            "写入", "编辑", "创建", "生成",
+            "删除", "调用", "执行", "运行", "安装",
+            "搜索", "查找", "查询", "百度",
+            "看看", "打开", "访问",
             "记住", "记住我", "记一下", "记好", "帮我记住", "请记住",
+            # ⭐ 分析类关键词（v0.22: 触发真实工具执行，不只是方法论描述）
+            "分析", "审计", "检查", "诊断", "评估", "排查", "检测",
+            "对比", "比较", "测试", "验证", "调试", "排查",
+            # ⭐ 安全放宽：以下单字仅触发特定场景（避免误判日常用语）
+            # 删/改/写/查/试/跑 → 只在实际意图明确时才触发
         ]
+        # ⭐ 主检测：先判断是否有 action 关键词
+        has_action = any(v in msg.lower() for v in ACTION_WORDS)
+        # ⭐ 精确匹配：单字 action 通过正则确保是独立意图（避免误判日常用语）
+        _single_char_actions = ("删", "改", "写", "查", "试", "跑")
+        # 用正则：前面是行首/空格/标点，后面是行尾/空格/标点
+        _has_single_char_action = bool(re.search(
+            r'(?:^|[\s，。！？；：、])[' + ''.join(_single_char_actions) + r'](?:$|[\s，。！？；：、])',
+            msg
+        ))
+        has_action = has_action or _has_single_char_action
         # ⭐ 继续/下一步 → 必须进 Agent 路径（否则不能调工具继续写文件等操作）
         IS_CONTINUATION = (
             msg in ("继续", "继续！", "继续执行") or msg.startswith("继续")
             or msg in ("next", "continue", "go on", "下一步", "然后呢")
         )
-        has_action = any(v in msg.lower() for v in ACTION_WORDS)
-        # 简单问答 = 没有文件/执行动作关键词 + 非继续 + 非长文本
-        # 注意：查/搜索/新闻类关键词不再强制走 agent 路径。
-        # 简单路径已开启 DeepSeek enable_search，让模型自己搜索，
-        # 效果远好于 agent 循环里的复杂 tool chain。
-        is_simple = (len(msg) < 60) and not has_action and not IS_CONTINUATION
+        # ⭐ 含 URL 必须走 agent 路径（需要 web_fetch 工具）
+        has_url = "http://" in msg or "https://" in msg
+        # 简单问答 = 没有文件/执行动作关键词 + 非继续 + 非长文本 + 无URL
+        is_simple = (len(msg) < 120) and not has_action and not IS_CONTINUATION and not has_url
 
         try:
             if is_simple:
@@ -856,6 +951,7 @@ async def chat_stream(req: ChatRequest):
                 yield f"data: {json.dumps({'type': 'orb_state', 'content': 'searching'})}\n\n"
 
                 # ⭐ 在后台线程执行 LLM 调用，不阻塞事件循环
+                # ⭐ thinking 模式保持启用（认知记忆需要推理能力）
                 _loop = asyncio.get_running_loop()
                 _llm_fn = functools.partial(
                     llm.chat_stream,
@@ -863,14 +959,20 @@ async def chat_stream(req: ChatRequest):
                     system_prompt=None,
                     temperature=0.5,
                     max_tokens=2048,
+                    enable_thinking=True,
                 )
-                # lambda ''.join() 在后台线程中迭代同步生成器
                 _future = _loop.run_in_executor(None, lambda: ''.join(_llm_fn()))
-                while not _future.done():
+                _keepalive_count = 0
+                _max_keepalive = 6
+                while not _future.done() and _keepalive_count < _max_keepalive:
                     _done, _ = await asyncio.wait([_future], timeout=15.0)
                     if not _future.done():
+                        _keepalive_count += 1
+                        if _keepalive_count >= _max_keepalive:
+                            logger.warning("⏰ 简单路径 LLM 超时(90s)，降级到 Agent")
+                            break
                         yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                full_text = _future.result()
+                full_text = _future.result() if _future.done() else ""
 
                 # 🔥 v0.17: 源头已分离（llm_client 不 yield reasoning_content）
                 # 不再需要 _strip_thinking_text() 事后过滤
@@ -883,22 +985,43 @@ async def chat_stream(req: ChatRequest):
                     _record_api_call(success=False, error_msg="empty_response")
                     # 🔥 v0.17: Send narration event
                     yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
-                    # ⭐ 子线程执行，不阻塞事件循环
-                    _loop = asyncio.get_running_loop()
-                    _agent_fn = functools.partial(
-                        agent.chat,
-                        message=req.message,
-                        agent_id=req.agent_id,
-                        session_id=req.session_id,
-                        temperature=0.5,
-                        messages=req.messages,
-                    )
-                    _agent_future = _loop.run_in_executor(None, _agent_fn)
-                    while not _agent_future.done():
-                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                        if not _agent_future.done():
-                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                    result = _agent_future.result()
+
+                    # ⭐ 检查 agent 是否正忙
+                    try:
+                        await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
+                    except asyncio.TimeoutError:
+                        yield f"data: {json.dumps({'type': 'error', 'content': '上一个请求还在处理中，请稍等几秒再试'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+                        return
+
+                    try:
+                        _agent_busy = True
+                        _loop = asyncio.get_running_loop()
+                        _agent_fn = functools.partial(
+                            agent.chat,
+                            message=req.message,
+                            agent_id=req.agent_id,
+                            session_id=req.session_id,
+                            temperature=0.5,
+                            messages=req.messages,
+                        )
+                        _agent_future = _loop.run_in_executor(None, _agent_fn)
+                        # 🔥 加超时：8×15s=120s
+                        _ka_count = 0
+                        _max_ka = 8
+                        while not _agent_future.done() and _ka_count < _max_ka:
+                            _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                            if not _agent_future.done():
+                                _ka_count += 1
+                                if _ka_count >= _max_ka:
+                                    logger.warning("⏰ Agent 降级路径超时(120s)")
+                                    break
+                                yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                        result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0, "memories_stored": 0}
+                    finally:
+                        _agent_busy = False
+                        _agent_lock.release()
+
                     reply = result.get("reply", "")
                     if reply:
                         yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
@@ -910,30 +1033,68 @@ async def chat_stream(req: ChatRequest):
 
                 # ⭐ 整个输出清理后的回复（快速响应比逐句更可靠）
                 yield f"data: {json.dumps({'type': 'token', 'content': cleaned})}\n\n"
+
+                # 🔥 v0.21.1: streaming simple path 也自动提取（跳过问句）
+                if cogni and len(req.message) > 8:
+                    _q = {"什么", "吗", "？", "?", "谁", "怎么", "如何", "为什么", "哪些"}
+                    _has_question = any(kw in req.message for kw in _q)
+                    if not _has_question:
+                        _self_ref = {"我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
+                                     "我住在", "我在", "我有", "我没有", "我会",
+                                     "我的爱好", "我想", "我想要", "我打算", "我计划",
+                                     "我负责", "我工作", "我学习"}
+                        if any(kw in req.message for kw in _self_ref):
+                            try:
+                                cogni.remember(
+                                    text=req.message, agent_id=req.agent_id,
+                                    source=f"chat_stream:{req.session_id}" if req.session_id else "chat_stream",
+                                    source_type="user_statement",
+                                )
+                            except Exception:
+                                pass
+
                 _record_api_call(success=True)
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             else:
                 logger.info("Complex task detected — using agent loop")
                 # 🔥 v0.17: Send narration event (frontend shows orb + text)
                 yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
-                # ⭐ 在子线程运行 agent.chat()，不阻塞事件循环
-                # SSE 连接 15s 无数据会超时 → 每 15s 发心跳保活
-                _loop = asyncio.get_running_loop()
-                _agent_fn = functools.partial(
-                    agent.chat,
-                    message=req.message,
-                    agent_id=req.agent_id,
-                    session_id=req.session_id,
-                    temperature=0.5,
-                    messages=req.messages,
-                )
-                _agent_future = _loop.run_in_executor(None, _agent_fn)
-                # 心跳循环：等 agent 完成，每 15s 发 keepalive 防超时
-                while not _agent_future.done():
-                    _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                    if not _agent_future.done():
-                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                result = _agent_future.result()
+
+                # ⭐ 防止 agent 单例并发死锁：检查是否已有请求在处理
+                try:
+                    await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'error', 'content': '上一个请求还在处理中，请稍等几秒再试'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+                    return
+
+                try:
+                    _agent_busy = True
+                    _loop = asyncio.get_running_loop()
+                    _agent_fn = functools.partial(
+                        agent.chat,
+                        message=req.message,
+                        agent_id=req.agent_id,
+                        session_id=req.session_id,
+                        temperature=0.5,
+                        max_iterations=8,  # 🔥 v0.22: 30→8，大部分查询提前退出
+                        messages=req.messages,
+                    )
+                    _agent_future = _loop.run_in_executor(None, _agent_fn)
+                    # 🔥 加超时：8×15s=120s
+                    _ka_count = 0; _max_ka = 8
+                    while not _agent_future.done() and _ka_count < _max_ka:
+                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                        if not _agent_future.done():
+                            _ka_count += 1
+                            if _ka_count >= _max_ka:
+                                logger.warning("⏰ Agent 复杂路径超时(120s)")
+                                break
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0, "memories_stored": 0}
+                finally:
+                    _agent_busy = False
+                    _agent_lock.release()
                 reply = result.get("reply", "")
                 memories_stored = result.get("memories_stored", 0)
 
@@ -964,28 +1125,50 @@ async def chat_stream(req: ChatRequest):
             # 🔥 v0.17: Send narration before agent fallback
             yield f"data: {json.dumps({'type': 'narration', 'content': '处理中…'})}\n\n"
             try:
-                # ⭐ 子线程执行，不阻塞事件循环
-                _loop = asyncio.get_running_loop()
-                _agent_fn = functools.partial(
-                    agent.chat,
-                    message=req.message,
-                    agent_id=req.agent_id,
-                    session_id=req.session_id,
-                    temperature=0.5,
-                    messages=req.messages,
-                )
-                _agent_future = _loop.run_in_executor(None, _agent_fn)
-                while not _agent_future.done():
-                    _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
-                    if not _agent_future.done():
-                        yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                result = _agent_future.result()
+                # ⭐ 检查 agent 是否正忙
+                try:
+                    await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'error', 'content': '上一个请求还在处理中，请稍等几秒再试'})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+                    return
+
+                try:
+                    _agent_busy = True
+                    _loop = asyncio.get_running_loop()
+                    _agent_fn = functools.partial(
+                        agent.chat,
+                        message=req.message,
+                        agent_id=req.agent_id,
+                        session_id=req.session_id,
+                        temperature=0.5,
+                        max_iterations=8,  # 🔥 v0.22
+                        messages=req.messages,
+                    )
+                    _agent_future = _loop.run_in_executor(None, _agent_fn)
+                    # 🔥 加超时：8×15s=120s
+                    _ka_count = 0; _max_ka = 8
+                    while not _agent_future.done() and _ka_count < _max_ka:
+                        _done, _ = await asyncio.wait([_agent_future], timeout=15.0)
+                        if not _agent_future.done():
+                            _ka_count += 1
+                            if _ka_count >= _max_ka:
+                                logger.warning("⏰ Exception handler agent fallback 超时(120s)")
+                                break
+                            yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
+                    result = _agent_future.result() if _agent_future.done() else {"reply": "", "tools_called": 0}
+                finally:
+                    _agent_busy = False
+                    _agent_lock.release()
+
                 reply = result.get("reply", "") or "抱歉，我遇到了一个暂时的问题，请再试一次。"
                 yield f"data: {json.dumps({'type': 'token', 'content': reply})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
             except Exception as e2:
                 logger.exception("Agent fallback also failed: %s", e2)
                 yield f"data: {json.dumps({'type': 'error', 'content': str(e2)[:200]})}\n\n"
+                # 🔥 确保 done 永远发出（避免前端无限等待）
+                yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
 
     return StreamingResponse(
         event_stream(),
@@ -1007,50 +1190,146 @@ async def chat(req: ChatRequest):
     """
     msg = req.message.strip()
     _ACTION_WORDS = [
-        "爬", "下载", "读取", "写入", "编辑", "创建", "写", "生成",
-        "改", "删", "跑", "试", "调用", "执行", "运行", "安装",
-        "分析", "对比", "搜", "查", "搜索", "查找", "查询", "百度",
+        "爬", "下载", "读取", "写入", "编辑", "创建", "生成",
+        "删除", "调用", "执行", "运行", "安装",
+        "搜索", "查找", "查询", "百度",
+        "看看", "打开", "访问",
         "记住", "记住我", "记一下", "记好", "帮我记住", "请记住",
+        # ⭐ 分析类关键词（v0.22: 触发真实工具执行）
+        "分析", "审计", "检查", "诊断", "评估", "排查", "检测",
+        "对比", "比较", "测试", "验证", "调试", "排查",
+        # 删/改/写/查/试/跑 → 下面用正则精确匹配
     ]
-    _IS_CONT = msg in ("继续", "继续！", "继续执行") or msg.startswith("继续") or msg in ("next", "continue", "go on")
+    # ⭐ 精确匹配：单字 action 通过正则确保是独立意图
+    _single_char_actions = ("删", "改", "写", "查", "试", "跑")
     _has_action = any(v in msg.lower() for v in _ACTION_WORDS)
-    is_simple = (len(msg) < 60) and not _has_action and not _IS_CONT
+    _has_action = _has_action or bool(re.search(
+        r'(?:^|[\s，。！？；：、])[' + ''.join(_single_char_actions) + r'](?:$|[\s，。！？；：、])',
+        msg
+    ))
+    _IS_CONT = msg in ("继续", "继续！", "继续执行") or msg.startswith("继续") or msg in ("next", "continue", "go on")
+    # ⭐ 含 URL 必须走 agent 路径（需要 web_fetch 工具）
+    _has_url = "http://" in msg or "https://" in msg
+    is_simple = (len(msg) < 120) and not _has_action and not _IS_CONT and not _has_url
 
     if is_simple:
-        # ⭐ 简单路径
+        # ⭐ 简单路径（v0.23: 可调只读工具，不进 Agent 循环）
         system, llm_messages = _build_context(
             user_message=msg, agent_id=req.agent_id,
             session_id=req.session_id, conversation_history=req.messages,
         )
+        _simple_tools_called = 0  # 🔥 v0.23: 简单路径工具计数
         try:
-            # ⭐ 用 chat() 而非 chat_stream()：DeepSeek thinking 模式将 reasoning_content
-            # 和 content 分开返回，chat_stream 把两者都 yield 出来导致思考内容泄漏。
-            # chat() 只返回 content，不包含 reasoning_content，天然避免泄漏。
-            full_text = llm.chat(
-                messages=llm_messages, system_prompt=None,
-                temperature=0.5, max_tokens=4096,
+            _t0 = time.time()
+
+            # 🔥 v0.23: 简单路径 + 只读工具（read_file/web_search/memory_recall等）
+            # 第一步：用 chat_completion 看 LLM 需不需要调工具
+            # 不需要 → 直接返回文本（0 额外开销）
+            # 需要   → 执行工具 → 再调一次合成回复（共2次LLM调用）
+            readonly_tools = _get_readonly_tool_schemas(tool_registry)
+            _resp = llm.chat_completion(
+                messages=llm_messages,
+                tools=readonly_tools,
+                temperature=0.5,
             )
+            _msg = _resp.choices[0].message
+
+            if _msg.tool_calls:
+                # ── 调了只读工具 → 执行 → 合成回复 ──
+                logger.info("📊 POST /chat 简单路径调用了 %d 个只读工具", len(_msg.tool_calls))
+
+                # 追加 assistant tool_calls 消息
+                llm_messages.append({
+                    "role": "assistant",
+                    "content": _msg.content or "",
+                    "tool_calls": [
+                        {"id": tc.id, "type": "function",
+                         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                        for tc in _msg.tool_calls
+                    ],
+                })
+
+                # 执行每个只读工具
+                for tc in _msg.tool_calls:
+                    try:
+                        _args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        _args = {}
+                    _result = tool_registry.execute(tc.id, tc.function.name, _args, None)
+                    _simple_tools_called += 1
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(_result, ensure_ascii=False, default=str)[:2000],
+                    })
+
+                # 第二次调用：工具结果 → 合成最终回复
+                full_text = llm.chat(
+                    messages=llm_messages, system_prompt=None,
+                    temperature=0.5, max_tokens=4096,
+                    enable_thinking=True,
+                )
+                logger.info("📊 POST /chat 简单路径(工具) %.1fs  %d工具",
+                            time.time() - _t0, len(_msg.tool_calls))
+            else:
+                # ── 没调工具 → 直接返回文本 ──
+                full_text = _msg.content or ""
+                logger.info("📊 POST /chat 简单路径(直接) %.1fs", time.time() - _t0)
+
         except Exception as e:
             logger.warning("简单路径 LLM 调用失败: %s", e)
             full_text = ""
         if full_text.strip():
             reply = full_text.replace("【完成】", "").strip() or full_text.strip()
-            return {"agent_id": req.agent_id, "reply": reply, "memories_used": 0, "tools_called": 0, "iterations": 0, "tool_sequence": []}
+
+            # 🔥 v0.21.1: 简单路径也自动提取用户知识
+            # 只提取陈述句，跳过问句（避免「我叫什么」→「用户 是 什么」）
+            if cogni and len(req.message) > 8:
+                _q = {"什么", "吗", "？", "?", "谁", "怎么", "如何", "为什么", "哪些"}
+                _has_question = any(kw in req.message for kw in _q)
+                if not _has_question:
+                    _self_ref = {"我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
+                                 "我住在", "我在", "我有", "我没有", "我会",
+                                 "我的爱好", "我想", "我想要", "我打算", "我计划",
+                                 "我负责", "我工作", "我学习"}
+                    if any(kw in req.message for kw in _self_ref):
+                        try:
+                            cogni.remember(
+                                text=req.message, agent_id=req.agent_id,
+                                source=f"chat_simple:{req.session_id}" if req.session_id else "chat_simple",
+                                source_type="user_statement",
+                            )
+                        except Exception:
+                            pass
+
+            return {"agent_id": req.agent_id, "reply": reply, "memories_used": 0, "tools_called": _simple_tools_called, "iterations": 1 if _simple_tools_called else 0, "tool_sequence": []}
         # 降级到 agent
         logger.warning("simple path empty — falling back to agent")
 
     if agent:
-        recent = []
-        if req.messages:
-            recent = [{"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
-                      for m in req.messages[-10:] if m.get("content")]
-        result = agent.chat(
-            message=req.message,
-            agent_id=req.agent_id,
-            session_id=req.session_id,
-            temperature=0.5,
-            messages=recent,
-        )
+        # ⭐ 防止 agent 单例并发死锁
+        try:
+            await asyncio.wait_for(_agent_lock.acquire(), timeout=0.01)
+        except asyncio.TimeoutError:
+            return {"agent_id": req.agent_id, "reply": "上一个请求还在处理中，请稍等几秒再试。", "tools_called": 0, "iterations": 0, "tool_sequence": []}
+
+        try:
+            _agent_busy = True
+            recent = []
+            if req.messages:
+                recent = [{"role": ("assistant" if m["role"] == "agent" else m["role"]), "content": m["content"][:500]}
+                          for m in req.messages[-10:] if m.get("content")]
+            result = agent.chat(
+                message=req.message,
+                agent_id=req.agent_id,
+                session_id=req.session_id,
+                temperature=0.5,
+                max_iterations=8,  # 🔥 v0.22: 30→8
+                messages=recent,
+            )
+        finally:
+            _agent_busy = False
+            _agent_lock.release()
         reply = result.get("reply", "")
         if not reply.strip():
             tools = result.get("tools_called", 0)
@@ -1741,16 +2020,79 @@ async def search_memories(q: str = "", agent_id: str = "default", limit: int = 2
 
 @app.post("/consolidate")
 async def consolidate(agent_id: str = "default"):
-    """触发记忆归纳整合（抽象化 + 衰减 + 去重）"""
+    """触发记忆归纳整合（抽象化 + 衰减 + 去重 + 矛盾自动解析）
+
+    🔥 v0.21: 整合 FactVerifier 子 Agent，自动解析矛盾事实。
+    """
     if cogni is None:
         return {"agent_id": agent_id, "result": {}, "message": "CogniMem 未初始化"}
+
+    # 1. 基础整合（含矛盾扫描）
     result = cogni.consolidate(agent_id)
+    contradictions_found = result.get("contradictions", 0)
+
+    # 2. 子 Agent 事实验证（仅当有矛盾且有 LLM 可用时）
+    verifier_results = []
+    if contradictions_found > 0 and llm is not None:
+        try:
+            verifier = FactVerifier(llm)
+            all_facts = cogni.fact_network._get_agent_facts(agent_id)
+            contradictions = cogni.fact_network.get_contradictions(agent_id)
+
+            # 收集矛盾对（最多 5 对）
+            pairs = []
+            for c in contradictions[:5]:
+                fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
+                fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
+                if fa and fb:
+                    pairs.append((fa.to_dict(), fb.to_dict()))
+
+            if pairs:
+                # 🔥 v0.21.1: batch_verify——1次LLM调用处理所有矛盾
+                verdicts = verifier.batch_verify(pairs, agent_id=agent_id)
+                resolved = 0
+
+                for verdict, c in zip(verdicts, contradictions[:5]):
+                    fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
+                    fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
+                    if not fa or not fb:
+                        continue
+                    if verdict.error:
+                        logger.warning("矛盾解析失败: %s", verdict.error)
+                        continue
+                    if verdict.winner_id:
+                        resolved += 1
+                        if verdict.winner_id == c.fact_a_id:
+                            cogni.fact_network._update_confidence(c.fact_a_id, min(1.0, fa.confidence + 0.15))
+                            cogni.fact_network._update_confidence(c.fact_b_id, max(0.0, fb.confidence - 0.10))
+                        else:
+                            cogni.fact_network._update_confidence(c.fact_b_id, min(1.0, fb.confidence + 0.15))
+                            cogni.fact_network._update_confidence(c.fact_a_id, max(0.0, fa.confidence - 0.10))
+                    verifier_results.append({
+                        "fact_a": f"{fa.subject} {fa.predicate} {fa.object}",
+                        "fact_b": f"{fb.subject} {fb.predicate} {fb.object}",
+                        "winner": verdict.winner_text or "不确定",
+                        "confidence": verdict.confidence,
+                        "reasoning": verdict.reasoning[:100],
+                        "needs_user": verdict.needs_user_input,
+                    })
+
+                result["verifier_resolved"] = resolved
+                result["verifier_results"] = verifier_results
+                logger.info("🔍 子Agent批量矛盾解析: 解决 %d/%d 对 (1次LLM调用)",
+                            resolved, len(pairs))
+
+        except Exception as e:
+            logger.warning("FactVerifier 矛盾解析失败: %s", e)
+            result["verifier_error"] = str(e)[:100]
+
     return {
         "agent_id": agent_id,
         "result": result,
         "message": f"合并 {result.get('merged',0)} 条，"
                    f"抽象化 {result.get('abstracted',0)} 组，"
-                   f"衰减 {result.get('decayed',0)} 条",
+                   f"衰减 {result.get('decayed',0)} 条，"
+                   f"矛盾解析 {len(verifier_results)} 对",
     }
 
 

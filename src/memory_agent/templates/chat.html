@@ -498,6 +498,10 @@
   .chat-input button { padding: 8px 20px; border-radius: 8px; border: none; background: var(--accent); color: white; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; white-space: nowrap; }
   .chat-input button:hover { filter: brightness(1.1); transform: translateY(-1px); box-shadow: 0 2px 8px rgba(139,92,246,0.3); }
   .chat-input button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; transform: none; box-shadow: none; }
+  /* 📎 上传按钮 */
+  .upload-btn { background: none; border: none; color: var(--text-muted); cursor: pointer; padding: 0 6px; font-size: 18px; line-height: 1; transition: color 0.15s; display: flex; align-items: center; }
+  .upload-btn:hover { color: var(--accent); }
+  .upload-name { font-size: 11px; color: var(--text-muted); padding: 0 4px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
   .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; width: 360px; }
@@ -669,6 +673,11 @@
     </div>
   </div>
 
+  <!-- ⭐ 系统健康警告横幅 -->
+  <div id="health-warning" style="display:none;padding:6px 16px;background:#fef3cd;color:#856404;font-size:12px;text-align:center;border-bottom:1px solid #ffc107">
+    ⚠️ 系统部分功能异常（数据库连接异常），记忆可能无法持久化保存
+  </div>
+
   <div class="chat-msgs" id="chat-msgs">
     <div class="empty-state" id="empty-state">
       <div class="empty-brain">🧠</div>
@@ -693,6 +702,9 @@
       <span style="font-size:10px;color:var(--text-muted);cursor:pointer" onclick="document.getElementById('model-select').style.display=document.getElementById('model-select').style.display==='none'?'':'none'">⚙</span>
     </div>
     <div class="input-row">
+      <button class="upload-btn" onclick="document.getElementById('file-input').click()" title="上传文件">📎</button>
+      <input type="file" id="file-input" style="display:none" onchange="uploadFile(this)">
+      <span class="upload-name" id="upload-name"></span>
       <input type="text" id="msg-input" placeholder="给 Agent 发消息…" autofocus
              onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}">
       <button id="send-btn" onclick="sendMsg()">发送</button>
@@ -874,13 +886,13 @@ function _hideTyping() {
 function _setStreaming(v) {
   _streaming = v;
   if (v) {
-    // ⭐ 120 秒强制解锁：防止 _streaming 卡死（DeepSeek 搜索+思考可能 >30s）
+    // 🔥 180 秒强制解锁：DeepSeek thinking + 工具循环可能 >90s
     if (_streamingTimer) clearTimeout(_streamingTimer);
     _streamingTimer = setTimeout(() => {
       _streaming = false;
       document.getElementById('send-btn').disabled = false;
-      console.warn('⏰ _streaming 120s 超时自动解锁');
-    }, 120000);
+      console.warn('⏰ _streaming 180s 超时自动解锁');
+    }, 180000);
   } else {
     if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
   }
@@ -1067,63 +1079,128 @@ function updateTitle() {
 
 // ⭐ 普通 POST 发送（streaming 降级用）
 function _postChat(r, body) {
+  // 🔥 30s 超时保护，不让 fetch 卡死
+  let _pcTimer = setTimeout(() => { _pcAbort.abort(); }, 30000);
+  const _pcAbort = new AbortController();
   fetch('/chat', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body,
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body, signal: _pcAbort.signal,
   })
   .then(res => {
+    clearTimeout(_pcTimer);
     if (!res.ok) throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败');
     return res.json();
   })
   .then(data => {
-    const ty = document.getElementById('typing');
-    _hideTyping();
-
-    const d2 = D();
-    const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
-    if (s2) {
-      s2.msgs.push({role: 'agent', content: data.reply, time: Date.now(), meta: 'none'});
-      S(d2);
+    try {
+      clearTimeout(_pcTimer);
+      _hideTyping();
+      const d2 = D();
+      const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
+      if (s2) {
+        s2.msgs.push({role: 'agent', content: data.reply, time: Date.now(), meta: 'none'});
+        S(d2);
+      }
+      const ad = document.createElement('div');
+      ad.className = 'msg agent';
+      let dHtml = '<div>' + esc(data.reply) + '</div>';
+      if (data.tool_sequence && data.tool_sequence.length > 0) {
+        const steps = data.tool_sequence.map(function(s) { return '🛠️ ' + esc(s); }).join('<br>');
+        dHtml = '<div style="font-size:12px;color:#666;padding:6px 10px;background:#f7f8fa;border-radius:6px;margin-bottom:8px">' + steps + '</div>' + dHtml;
+      }
+      ad.innerHTML = dHtml;
+      if (data.tools_called > 0) {
+        const m = document.createElement('span'); m.className = 'meta'; m.textContent = '🛠️ ' + data.tools_called + ' 次工具调用 🔄 ' + (data.iterations || 0) + ' 轮思考';
+        ad.appendChild(m);
+      } else if (data.new_memories_stored > 0) {
+        const m = document.createElement('span'); m.className = 'meta'; m.textContent = '📚 ' + (data.memories_used || 0) + ' 引用 🧠 +' + data.new_memories_stored;
+        ad.appendChild(m);
+      }
+      const t = document.createElement('span'); t.className = 'time'; t.textContent = fmtTime(Date.now());
+      ad.appendChild(t);
+      document.getElementById('chat-msgs').appendChild(ad);
+      scrollB();
+      refreshSidebar();
+    } catch(e) {
+      fetch('/health?js_err=' + encodeURIComponent('_postChat_then:' + e.message), {method:'GET'}).catch(()=>{});
+    } finally {
+      document.getElementById('send-btn').disabled = false;
+      _streaming = false;
     }
-
-    const ad = document.createElement('div');
-    ad.className = 'msg agent';
-    let dHtml = '<div>' + esc(data.reply) + '</div>';
-    if (data.tool_sequence && data.tool_sequence.length > 0) {
-      const steps = data.tool_sequence.map(function(s) { return '🛠️ ' + esc(s); }).join('<br>');
-      dHtml = '<div style="font-size:12px;color:#666;padding:6px 10px;background:#f7f8fa;border-radius:6px;margin-bottom:8px">' + steps + '</div>' + dHtml;
-    }
-    ad.innerHTML = dHtml;
-    if (data.tools_called > 0) {
-      const m = document.createElement('span'); m.className = 'meta'; m.textContent = '🛠️ ' + data.tools_called + ' 次工具调用 🔄 ' + (data.iterations || 0) + ' 轮思考';
-      ad.appendChild(m);
-    } else if (data.new_memories_stored > 0) {
-      const m = document.createElement('span'); m.className = 'meta'; m.textContent = '📚 ' + (data.memories_used || 0) + ' 引用 🧠 +' + data.new_memories_stored;
-      ad.appendChild(m);
-    }
-    const t = document.createElement('span'); t.className = 'time'; t.textContent = fmtTime(Date.now());
-    ad.appendChild(t);
-    document.getElementById('chat-msgs').appendChild(ad);
-    scrollB();
-    document.getElementById('send-btn').disabled = false;
-    _streaming = false;
-    refreshSidebar();
   })
   .catch(err => {
+    clearTimeout(_pcTimer);
     _streaming = false;
     const ty = document.getElementById('typing');
     _hideTyping();
     const dX = D();
     const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
-    if (sX) {
-      sX.msgs.push({role: 'agent', content: '⚠️ 请求失败: ' + err.message, time: Date.now()});
-      S(dX);
+    const errMsg = err.name === 'AbortError' ? '⚠️ 请求超时(30s)，请重试或换个问题。' : '⚠️ 请求失败: ' + err.message;
+    try {
+      if (sX) {
+        sX.msgs.push({role: 'agent', content: errMsg, time: Date.now()});
+        S(dX);
+      }
+      const ed = document.createElement('div');
+      ed.className = 'msg agent';
+      ed.innerHTML = '<div>' + errMsg + '</div>';
+      document.getElementById('chat-msgs').appendChild(ed);
+    } catch(e) {
+      fetch('/health?js_err=' + encodeURIComponent('_postChat_catch:' + e.message), {method:'GET'}).catch(()=>{});
+    } finally {
+      document.getElementById('send-btn').disabled = false;
+      _streaming = false;
     }
-    const ed = document.createElement('div');
-    ed.className = 'msg agent';
-    ed.innerHTML = '<div>❌ ' + esc(err.message) + '</div>';
-    document.getElementById('chat-msgs').appendChild(ed);
-    document.getElementById('send-btn').disabled = false;
   });
+}
+
+// 📎 文件上传
+function uploadFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const label = document.getElementById('upload-name');
+  label.textContent = '📎 ' + file.name;
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('agent_id', getAgentId());
+
+  fetch('/upload?agent_id=' + encodeURIComponent(getAgentId()), {
+    method: 'POST',
+    body: form,
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.path) {
+      // 把文件路径填入输入框，方便发送
+      const inp = document.getElementById('msg-input');
+      inp.value = '我刚上传了文件 ' + data.filename + '，请读取并处理。路径: ' + data.path;
+      label.textContent = '✅ ' + file.name;
+      // 加到聊天记录里
+      addMsg('user', '📎 上传文件: ' + file.name + ' (' + (data.size/1024).toFixed(1) + 'KB)');
+    } else {
+      label.textContent = '❌ 上传失败';
+    }
+  })
+  .catch(err => {
+    label.textContent = '❌ 上传出错';
+    console.error('upload error:', err);
+  });
+}
+
+// ⭐ 系统健康状态轮询（每60秒检查DB/LLM状态，异常时显示横幅）
+function checkHealth() {
+  fetch('/health')
+    .then(r => r.json())
+    .then(h => {
+      const warn = document.getElementById('health-warning');
+      const dbOk = h.checks && h.checks.db && h.checks.db.startsWith('✅');
+      if (!dbOk) {
+        warn.style.display = 'block';
+      } else {
+        warn.style.display = 'none';
+      }
+    })
+    .catch(() => { /* 静默失败 */ });
 }
 
 function sendMsg() {
@@ -1175,206 +1252,9 @@ function sendMsg() {
   if (_orb) _orb.start('working');
   scrollB();
 
-  // 传全部历史消息（后端自己控制保留多少条）
+  // 🔥 直接用 POST /chat，不用流式
   const body = JSON.stringify({agent_id: r.agentId, session_id: r.sessId, message: text, messages: r.sess.msgs.map(m => ({role: m.role, content: m.content}))});
-
-  // Try streaming first
-  fetch('/chat/stream', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body,
-  })
-  .then(res => {
-    if (!res.ok) { _streaming = false; throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败'); }
-
-    // Remove typing indicator, create streaming message element
-    _hideTyping();
-
-    const ad = document.createElement('div');
-    ad.className = 'msg agent streaming';
-    ad.innerHTML = '<div class="stream-content"></div><span class="time">' + fmtTime(Date.now()) + '</span>';
-    document.getElementById('chat-msgs').appendChild(ad);
-    document.getElementById('send-btn').disabled = false;
-    scrollB();
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let fullText = '';
-    let _firstTokenTimer = null;
-    _firstTokenTimer = setTimeout(() => {
-      if (!fullText && _streaming) {
-        _streaming = false;
-        try { reader.cancel(); } catch(e) {}
-        _hideTyping();
-        try { ad.remove(); } catch(e) {}
-        if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
-        // 首 token 超时 → 降级到普通 POST /chat
-        // ⭐ 25s 窗口：容纳后端 15s keepalive 间隔 + 缓冲
-        _postChat(r, body);
-      }
-    }, 25000);
-
-    function readStream() {
-      reader.read().then(({done, value}) => {
-        if (done) {
-          if (_firstTokenTimer) clearTimeout(_firstTokenTimer);
-          _streaming = false;
-          // ⭐ 空响应保护：stream 完成但没内容 → 降级到 POST
-          if (!fullText.trim()) {
-            try { ad.remove(); } catch(e) {}
-            if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
-            _postChat(r, body);
-            return;
-          }
-          const d3 = D();
-          const s3 = d3.agents[r.agentId]?.sessions?.[r.sessId];
-          if (s3) {
-            s3.msgs.push({role: 'agent', content: fullText, time: Date.now()});
-            S(d3);
-          }
-          ad.classList.remove('streaming');
-          ad.className = 'msg agent';
-          const contentDiv = ad.querySelector('.stream-content') || ad;
-          contentDiv.innerHTML = md(fullText);
-          document.getElementById('send-btn').disabled = false;
-          scrollB();
-          refreshSidebar();
-          return;
-        }
-
-        const chunk = decoder.decode(value, {stream: true});
-        const lines = chunk.split('\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              // ⭐ 收到任何事件都重置首 token 超时计时器（25s 匹配后端 keepalive 间隔）
-              if (_firstTokenTimer) { clearTimeout(_firstTokenTimer); }
-              _firstTokenTimer = setTimeout(() => {
-                if (!fullText && _streaming) {
-                  _streaming = false;
-                  try { reader.cancel(); } catch(e) {}
-                  _hideTyping();
-                  try { ad.remove(); } catch(e) {}
-                  if (_streamingTimer) { clearTimeout(_streamingTimer); _streamingTimer = null; }
-                  _postChat(r, body);
-                }
-              }, 25000);
-              if (data.type === 'token') {
-                fullText += data.content;
-                const cd = ad.querySelector('.stream-content');
-                if (cd) cd.textContent = fullText; else ad.textContent = fullText;
-                scrollB();
-              } else if (data.type === 'narration' || data.type === 'orb_state') {
-                // 🔥 v0.17: narration 更新 orb 状态
-                const text = data.content || '';
-                if (_orb) {
-                  const orbState = data.type === 'orb_state' ? text : _narrationToOrbState(text);
-                  if (orbState) _orb.start(orbState);
-                }
-                // also update label in the <streaming> typing area
-                const orbLabel = document.getElementById('orb-label');
-                if (orbLabel && data.type === 'narration') orbLabel.textContent = text;
-              } else if (data.type === 'meta') {
-                // 元数据展示（工具调用数等）
-                const cd = ad.querySelector('.stream-content') || ad;
-                const metaEl = document.createElement('div');
-                metaEl.className = 'meta';
-                metaEl.textContent = data.content;
-                cd.parentNode.appendChild(metaEl);
-              } else if (data.type === 'error') {
-                const cd = ad.querySelector('.stream-content') || ad;
-                cd.textContent = '❌ ' + data.content;
-              }
-            } catch(e) { /* ignore parse errors */ }
-          }
-        }
-        readStream();
-      }).catch(err => {
-        _streaming = false;
-        // 保存部分内容和错误到对话历史
-        const dR = D();
-        const sR = dR.agents[r.agentId]?.sessions?.[r.sessId];
-        if (sR && fullText) {
-          sR.msgs.push({role: 'agent', content: fullText + '\n\n[⚠️ 输出中断: ' + err.message + ']', time: Date.now()});
-          S(dR);
-        }
-        const cd = ad.querySelector('.stream-content') || ad;
-        cd.textContent = '❌ 流式读取失败: ' + err.message;
-      });
-    }
-    readStream();
-  })
-  .catch(() => {
-    _streaming = false;
-    // Remove the empty streaming div if it was created (avoids blank bubbles)
-    try { ad.remove(); } catch(e) {}
-    // Streaming failed — fall back to regular POST /chat
-    fetch('/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body,
-    })
-    .then(res => {
-      if (!res.ok) throw new Error(res.status === 503 ? 'API Key 未配置' : '请求失败');
-      return res.json();
-    })
-    .then(data => {
-      _streaming = false;
-      _hideTyping();
-
-      const d2 = D();
-      const s2 = d2.agents[r.agentId]?.sessions?.[r.sessId];
-      if (s2) {
-        s2.msgs.push({role: 'agent', content: data.reply, time: Date.now(), meta: 'none'});
-        S(d2);
-      }
-
-      const ad = document.createElement('div');
-      ad.className = 'msg agent';
-      let dHtml = '<div>' + esc(data.reply) + '</div>';
-      if (data.tool_sequence && data.tool_sequence.length > 0) {
-        const steps = data.tool_sequence.map(function(s) { return '🛠️ ' + esc(s); }).join('<br>');
-        dHtml = '<div style="font-size:12px;color:#666;padding:6px 10px;background:#f7f8fa;border-radius:6px;margin-bottom:8px">' + steps + '</div>' + dHtml;
-      }
-      ad.innerHTML = dHtml;
-      if (data.tools_called > 0) {
-        const m = document.createElement('span');
-        m.className = 'meta';
-        m.textContent = '🛠️ ' + data.tools_called + ' 次工具调用 🔄 ' + (data.iterations || 0) + ' 轮思考';
-        ad.appendChild(m);
-      } else if (data.new_memories_stored > 0) {
-        const m = document.createElement('span');
-        m.className = 'meta';
-        m.textContent = '📚 ' + (data.memories_used || 0) + ' 引用 🧠 +' + data.new_memories_stored;
-        ad.appendChild(m);
-      }
-      const t = document.createElement('span');
-      t.className = 'time';
-      t.textContent = fmtTime(Date.now());
-      ad.appendChild(t);
-      document.getElementById('chat-msgs').appendChild(ad);
-      scrollB();
-      document.getElementById('send-btn').disabled = false;
-      refreshSidebar();
-    })
-    .catch(err => {
-      _streaming = false;
-      _hideTyping();
-      // 保存错误到对话历史，保证下一轮能看到
-      const dX = D();
-      const sX = dX.agents[r.agentId]?.sessions?.[r.sessId];
-      if (sX) {
-        sX.msgs.push({role: 'agent', content: '⚠️ 请求失败: ' + err.message, time: Date.now()});
-        S(dX);
-      }
-      const ed = document.createElement('div');
-      ed.className = 'msg agent';
-      ed.innerHTML = '<div>❌ ' + esc(err.message) + '</div>';
-      document.getElementById('chat-msgs').appendChild(ed);
-      document.getElementById('send-btn').disabled = false;
-    });
-  });
+  _postChat(r, body);
 }
 
 // ── Sidebar-only refresh (no message rerender) ──
@@ -1692,6 +1572,8 @@ class CogniOrb {
     this._running = false;
   }
 
+  _isDark() { return this._themeMedia && this._themeMedia.matches; }
+
   // ── 状态颜色 ──
   _sc() { return STATE_COLORS[this.state] || STATE_COLORS.working; }
   _scPrev() { return STATE_COLORS[this._prevState] || STATE_COLORS.working; }
@@ -1989,12 +1871,25 @@ document.addEventListener('DOMContentLoaded', () => {
   _orb = new CogniOrb('orb-canvas', 'orb-label');
   // 每 5 秒切换一次 placeholder
   _phTimer = setInterval(_cyclePlaceholder, 5000);
+  // ⭐ 启动健康轮询（首次+每60秒）
+  checkHealth();
+  setInterval(checkHealth, 60000);
 });
 
 
 // ════════════════════════════════════════════════════════════
 //  Init
 // ════════════════════════════════════════════════════════════
+// 🔥 全局 JS 错误捕获（排查"思考中…"问题）
+window.onerror = function(msg, url, line, col, err) {
+  console.error('🚨 JS ERROR:', msg, 'at', line, col, err);
+  // 上报到服务器，方便在日志看到
+  fetch('/health?js_error=' + encodeURIComponent(String(msg).slice(0, 100)), {method: 'GET'}).catch(()=>{});
+};
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('🚨 UNHANDLED PROMISE:', e.reason);
+});
+
 // Clean up empty sessions from previous bugs
 try {
   const d = D();

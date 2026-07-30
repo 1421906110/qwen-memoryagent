@@ -34,6 +34,7 @@ from memory_agent.agent.memory_manager import MemoryManager, _IMPORTANT_TRIGGERS
 # 🔥 v0.17: 新模块
 from memory_agent.agent.registry import ToolRegistry, tool, get_registry
 from memory_agent.agent.engine import TurnEngine, Mode, TurnResult, ToolCache
+from memory_agent.agent.risk import RiskClass, classify as _classify_risk, is_consequential, has_shell_operators
 
 logger = logging.getLogger("agent")
 
@@ -93,8 +94,51 @@ _BASE_SYSTEM_PROMPT = (
     "4. 尽可能简洁但不牺牲正确性\n\n"
     "## 🚨 铁律\n"
     "1. 日期/时间/星期/几月 → 必须先调 shell 执行 date 命令查系统真实时间，不能凭训练数据回答\n"
-    "2. 不能直接写 /Users/baikai/Desktop/。先保存到 /home/ecs-user/，告诉用户 scp 拉取\n"
+    "2. 如果在服务器上（没有桌面路径），文件存 /home/ecs-user/ 然后告知 scp 拉取。如果本地运行且有 ~/Desktop/，可以直接写\n"
     "3. 已完成任务在回复末尾加上「【完成】」标记。需要继续处理的不加\n"
+    "4. ⚠️ 用户说「先分析告诉我/先看看」→ 只汇报分析结果，不做任何修改/删除/清理操作。用户看完后自然会告诉你下一步。先斩后奏是大忌！\n"
+    "5. ⚠️ 用户说「先X再Y」→ 只做X，完成后等待用户确认，得到明确指令后才做Y。不能自以为「用户肯定也想要Y」而跳步。\n\n"
+    "## 🧬 Claude Code 行为模式（蒸馏自 15 道工程师面试题）\n"
+    "以下模式是 Claude Code（顶尖 AI 编程助手）回答复杂问题的行为方式，你必须严格遵循：\n\n"
+    "### 🔍 跨文件分析（来自 Q1 循环依赖 + Q13 技术债量化）\n"
+    "- 拿到问题先收集上下文：用工具查文件是否存在、读关键代码段，绝不凭空猜测\n"
+    "- 构建依赖分析时：find→grep→构建关系图→DFS检测环→最小侵入重构\n"
+    "- 量化技术债：圈复杂度(CCN>15) + 行数(>50) + 参数个数(>4) 三指标过滤\n"
+    "- 输出格式：数据摘要 → 分析发现 → 具体建议（不改无关代码）\n\n"
+    "### 🐛 调试排错（来自 Q2 CI不一致 + Q9 死锁排查）\n"
+    "- 列假设按概率从高到低排序，附带每个假设的判断依据\n"
+    "- 第一步永远检查：环境变量(PATH/NODE_PATH) → 版本差异 → 依赖锁文件\n"
+    "- 偶发 Bug：用 faulthandler+SIGUSR1 生产环境不停机打印线程堆栈\n"
+    "- 输出：概率排序列表 + 第一步检查命令 + 修复步骤\n\n"
+    "### 🔧 Git 与配置（来自 Q3 rebase + Q14 Nginx回滚）\n"
+    "- 改历史：git log确认范围 → rebase -i标记edit → reset拆commit → git add -p分段提交\n"
+    "- 改配置：先备份(cp file{,.$(date +%s).bak}) → 改完立即验证(nginx -t/git diff/curl)\n"
+    "- 出错：立即回滚(cp backup original)，diff定位冲突块，合并后重新验证\n\n"
+    "### ⚡ 性能分析（来自 Q4 火焰图 + Q5 遗留系统）\n"
+    "- 找热点：定位火焰图最宽最深的调用栈 → 确定锁竞争/CPU/IO瓶颈\n"
+    "- 优化：最小改动原则，只改热点方法不改无关代码\n"
+    "- 迁移：先加测试固话行为 → 逐函数迁移 → 每次改完跑测试\n\n"
+    "### 🏗️ 架构决策（来自 Q10 Monorepo + Q11 @Transactional）\n"
+    "- 缓存设计：缓存键由 input_hash + tool_version + target_lang 组成\n"
+    "- 影响域分析：grep改动的类/方法 → 追踪所有调用链 → 列出每种场景的并发/一致性问题\n"
+    "- 输出：受影响组件列表 + 每个场景的风险描述 + 测试设计思路\n\n"
+    "### 🔐 安全与质量（来自 Q8 安全审计 + Q7 类型系统）\n"
+    "- 安全审计：npm audit/grype 扫描已知CVE → 最小补丁升级（不改major版本号）\n"
+    "- 类型爆炸：自引用条件类型拆为分层映射类型，尾递归避免栈溢出\n\n"
+    "### 🤖 自动化（来自 Q6 Shell管道 + Q12 Docker登录）\n"
+    "- Shell管道：sed + tee /dev/tty（终端显示+文件重定向双通道）\n"
+    "- 交互式登录：优先非交互方案(token/envar)，其次pexpect\n"
+    "- 原子性：&& 连接 + || 回滚 + git checkout保底\n\n"
+    "### 📐 决策元模式（来自 Q15 自反摘要）\n"
+    "- 先收集（读文件/查环境/看日志）再下结论，不猜\n"
+    "- 按概率排假设，每个假设附带验证方法\n"
+    "- 有专有工具优先（lizard > grep代码复杂度）\n"
+    "- 破坏性操作先--dry-run或备份，确认无误再执行\n"
+    "- 修改后立刻验证（curl测试/git diff/nginx -t）\n\n"
+    "### 🚨 铁律补充\n"
+    "- 文件类任务：生成的内容写入文件，提供路径和 scp 拉取命令\n"
+    "- 代码输出：给出完整代码片段 + 文件路径 + 使用说明\n"
+    "- 比较分析：用 Markdown 表格呈现对比维度和结论\n"
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -157,6 +201,21 @@ def _prune_messages(messages: list[dict]) -> list[dict]:
         if m not in keep:
             keep.append(m)
 
+    # 🔥 v0.22: DeepSeek 要求 tool 消息必须跟在对应的 tool_calls 消息后
+    # 如果裁剪导致 tool 消息缺少对应的 tool_calls → API 400 错误
+    # 扫描 keep 列表，为每个 tool 消息补充其对应的 assistant tool_calls 消息
+    _tool_msg_ids = set()
+    for m in keep:
+        if m.get("role") == "tool" and m.get("tool_call_id"):
+            _tool_msg_ids.add(m["tool_call_id"])
+    if _tool_msg_ids:
+        for m in non_system:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    if tc.get("id") in _tool_msg_ids and m not in keep:
+                        keep.append(m)
+                        break
+
     dropped = len(messages) - len(keep)
     logger.info("✂️ 消息裁剪: %d→%d (丢弃 %d 条旧工具记录)", len(messages), len(keep), dropped)
     return keep
@@ -218,11 +277,12 @@ class Agent:
 
     def __init__(self, llm_client, tool_registry: ToolRegistry,
                  cogni_client=None, system_prompt: str | None = None,
-                 reflector=None):
+                 reflector=None, mode: Mode = Mode.INTERACTIVE):
         self.llm = llm_client
         self.tools = tool_registry
         self.cogni = cogni_client
         self.reflector = reflector  # SelfReflector instance (optional)
+        self.mode = mode  # 权限模式（对标 OpenWorker PermissionEngine）
 
         self._default_system = system_prompt or (
             _BASE_SYSTEM_PROMPT +
@@ -345,7 +405,8 @@ class Agent:
         final_reply = ""
         tool_sequence = []
         llm_has_acted = False  # Track whether LLM has done any tool calls
-        search_count = 0       # ⭐ 搜索计数，限制自嗨（最多2次）
+        search_count = 0       # ⭐ web_search 计数（最多3次）
+        fetch_count = 0        # ⭐ web_fetch 计数（最多2次）
 
         for iteration in range(max_iterations):
             ctx.iteration = iteration + 1
@@ -362,7 +423,7 @@ class Agent:
 
             # ⭐ 搜索超限 → 限制继续搜索，但不移走所有工具定义
             #  让 LLM 仍然可以 write_file/shell，只是不继续搜索
-            if search_count > 4:
+            if search_count > 3 or fetch_count > 2:
                 if tool_defs:
                     logger.warning("🛑 搜索超限(%d次)，移除 web_search/web_fetch", search_count)
                     openai_messages.append({
@@ -430,15 +491,40 @@ class Agent:
                 # Execute each tool
                 ctx.state = AgentState.OBSERVING
                 for tc in msg.tool_calls:
+                    # ⭐ 在循环内也检查搜索上限，防一轮内工具数爆冲
+                    if tc.function.name == "web_search" and search_count > 3 or tc.function.name == "web_fetch" and fetch_count > 2:
+                        logger.warning("🛑 循环内拦截 %s (search_count=%d)", tc.function.name, search_count)
+                        openai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps({"error": "搜索已达上限，请根据已有结果直接回复"}),
+                        })
+                        continue
+
                     args_str = tc.function.arguments
                     try:
                         args = json.loads(args_str)
                     except json.JSONDecodeError:
                         args = {}
 
+                    # ── ⭐ v0.21: Risk-based permission check ──
+                    # 对标 OpenWorker `coworker/engine.py` 的 PermissionEngine
+                    perm_allowed = self._check_tool_permission(tc.function.name, args)
+                    if not perm_allowed:
+                        logger.warning("⛔ 权限拒绝: %s", tc.function.name)
+                        openai_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps({
+                                "error": f"权限拒绝: 「{tc.function.name}」在当前模式({self.mode.value})下不允许。"
+                                         "如需执行请切换模式或使用 AUTO 模式。"
+                            }),
+                        })
+                        continue
+
                     result = self.tools.execute(tc.id, tc.function.name, args, ctx)
 
-                    # ── ⭐ NEW: Self-reflection on error + Auto-Fix ──
+                    # ── ⭐ v0.21: Self-reflection on error + Auto-Fix ──
                     if "error" in result and self.reflector:
                         reflection = self.reflector.analyze(
                             tc.function.name, args, result["error"]
@@ -472,9 +558,11 @@ class Agent:
                         "content": json.dumps(result, ensure_ascii=False, default=str),
                     })
 
-                    # ⭐ 搜索次数限制（防自嗨）：最多搜2次，超过禁止继续调工具
+                    # ⭐ 搜索+抓取次数限制（防自嗨）：搜到结果就停，不需要逐条抓详情
                     if tc.function.name == "web_search":
                         search_count += 1
+                    elif tc.function.name == "web_fetch":
+                        fetch_count += 1
 
                     # ⭐ 连续错误追踪：同一工具连续失败计数
                     if "error" in result:
@@ -702,8 +790,31 @@ class Agent:
                         continue
                     # ⭐ v0.16: 完成标记驱动退出（有 plan 时也要支持）
                     if self._is_complete_response(text):
-                        final_reply = self._strip_completion_marker(text)
-                        logger.info("✅ Task complete via marker (with plan)")
+                        stripped = self._strip_completion_marker(text)
+                        if stripped == "已执行完成。" and ctx.tools_called > 0:
+                            # 同上：从消息历史构建有意义的回复
+                            _summaries = []
+                            for m in openai_messages:
+                                if isinstance(m, dict) and m.get("role") == "assistant":
+                                    for tc in m.get("tool_calls", []):
+                                        fn = tc.get("function", {}).get("name", "")
+                                        try:
+                                            args = json.loads(tc.get("function", {}).get("arguments", "{}"))
+                                        except json.JSONDecodeError:
+                                            args = {}
+                                        if fn == "write_file":
+                                            _summaries.append(f"已写入文件 {args.get('path','')}")
+                                        elif fn == "web_search":
+                                            _summaries.append(f"已搜索「{args.get('query','')}」")
+                                        elif fn == "execute_command":
+                                            _summaries.append(f"已执行命令")
+                            if _summaries:
+                                final_reply = "；".join(_summaries) + "。"
+                            else:
+                                final_reply = f"已完成。共调用 {ctx.tools_called} 次工具。"
+                        else:
+                            final_reply = stripped
+                        logger.info("✅ Task complete via marker (with plan, tools=%d)", ctx.tools_called)
                         break
 
                     # ⭐ 以上条件都不匹配时的兜底：
@@ -729,13 +840,52 @@ class Agent:
 
                     # ⭐ v0.16: 完成标记驱动退出
                     if self._is_complete_response(text):
-                        final_reply = self._strip_completion_marker(text)
-                        logger.info("✅ Task complete via marker")
+                        stripped = self._strip_completion_marker(text)
+                        # 🔥 LLM 只回了【完成】但有工具调用 → 从消息历史构建有意义的回复
+                        if stripped == "已执行完成。" and ctx.tools_called > 0:
+                            # 从对话历史找最后一次工具调用的结果
+                            for m in reversed(openai_messages):
+                                if isinstance(m, dict) and m.get("role") == "tool":
+                                    content = m.get("content", "")
+                                    # 限制长度，取关键信息
+                                    if len(content) > 200:
+                                        content = content[:200] + "…"
+                                    final_reply = f"已完成。{content}" if len(content) < 100 else "已完成。操作结果已返回，请查看上方详情。"
+                                    break
+                            else:
+                                # 找到最后一次 write_file 之类的动作
+                                _summaries = []
+                                for m in openai_messages:
+                                    if isinstance(m, dict) and m.get("role") == "assistant":
+                                        _tc = m.get("tool_calls", [])
+                                        for tc in _tc:
+                                            fn = tc.get("function", {}).get("name", "")
+                                            args_str = tc.get("function", {}).get("arguments", "{}")
+                                            try:
+                                                args = json.loads(args_str)
+                                            except json.JSONDecodeError:
+                                                args = {}
+                                            if fn == "write_file":
+                                                path = args.get("path", "")
+                                                _summaries.append(f"已写入文件 {path}")
+                                            elif fn == "web_search":
+                                                q = args.get("query", "")
+                                                _summaries.append(f"已搜索「{q}」")
+                                            elif fn == "execute_command":
+                                                cmd = args.get("command", "")
+                                                _summaries.append(f"已执行命令 {cmd[:50]}")
+                                if _summaries:
+                                    final_reply = "；".join(_summaries) + "。"
+                                else:
+                                    final_reply = f"已完成。共调用 {ctx.tools_called} 次工具。"
+                        else:
+                            final_reply = stripped
+                        logger.info("✅ Task complete via marker (tools=%d)", ctx.tools_called)
                         break
 
                     # 还没完成 → 继续
                     openai_messages.append({"role": "assistant", "content": text})
-                    
+
                     # 提醒 LLM 如果一直不标记完成
                     self._inject_completion_reminder(openai_messages, iteration)
         else:
@@ -746,10 +896,26 @@ class Agent:
                 # 工具调用不一定成功，final_reply 为空说明 LLM 一直没给出有效回复。
                 tool_count = ctx.tools_called
                 if tool_count > 0:
-                    # ⭐ 工具确实执行了，只是 LLM 没输出最终回复 → 告知已完成
-                    final_reply = (
-                        f"已执行 {tool_count} 次操作。如果还需要什么，告诉我就好。"
-                    )
+                    # ⭐ v2.0: 检查是否有工具返回了错误
+                    tool_errors = []
+                    for _m in openai_messages:
+                        if _m["role"] == "tool" and isinstance(_m.get("content"), str):
+                            try:
+                                _tr = json.loads(_m["content"])
+                                if "error" in _tr:
+                                    tool_errors.append(_tr["error"][:80])
+                            except (json.JSONDecodeError, TypeError, AttributeError):
+                                continue
+                    if tool_errors:
+                        final_reply = (
+                            f"执行过程中遇到了错误:\n"
+                            + "\n".join(f"  - {e}" for e in tool_errors[:3])
+                            + "\n请检查后重试。"
+                        )
+                    else:
+                        final_reply = (
+                            f"已执行 {tool_count} 次操作。如果还需要什么，告诉我就好。"
+                        )
                 else:
                     final_reply = "抱歉，我没能正确处理你的请求。能再说一次吗？"
         # ── Step 5: ⭐ Intelligent Memory Storage ──
@@ -809,6 +975,32 @@ class Agent:
                 self._auto_graduate_memories(agent_id)
         except Exception as e:
             logger.debug("Auto-graduation skipped: %s", e)
+
+        # ── 🔥 v0.21.1: 从用户消息自动提取知识（不依赖 LLM 工具调用）──
+        # 每次对话后，对用户原文跑规则提取器（0 token），直接把三元组存入记忆。
+        # 限制：跳过问句（含"什么/吗/？/谁"），只提取陈述性知识。
+        try:
+            if self.cogni and len(message) > 8:
+                _question_markers = {"什么", "吗", "？", "?", "谁", "怎么", "如何", "为什么", "哪些"}
+                if any(kw in message for kw in _question_markers):
+                    pass  # 问句不提取，避免「我叫什么」→「用户 是 什么」的噪音
+                else:
+                    _self_ref = {"我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
+                                 "我住在", "我在", "我有", "我没有", "我会", "我不会",
+                                 "我负责", "我工作", "我学习", "我家", "我公司",
+                                 "我的爱好", "我想", "我想要", "我打算", "我计划"}
+                    if any(kw in message for kw in _self_ref):
+                        _r = self.cogni.remember(
+                            text=message, agent_id=agent_id,
+                            source=f"agent_chat:{session_id}" if session_id else "agent_chat",
+                            source_type="user_statement",
+                        )
+                        _a = _r.get("facts_added", 0) if isinstance(_r, dict) else 0
+                        if _a > 0:
+                            stored_memories += _a
+                            logger.info("🧠 自动提取 %d 条知识: %s", _a, message[:50])
+        except Exception as e:
+            logger.debug("Auto-extract failed: %s", e)
 
         # ── Step 6: Return ──
         ctx.state = AgentState.DONE
@@ -1283,12 +1475,20 @@ class Agent:
         """LLM 回复是否包含完成标记。"""
         return _COMPLETION_MARKER in text
 
-    def _strip_completion_marker(self, text: str) -> str:
+    def _strip_completion_marker(self, text: str, ctx=None) -> str:
         """去掉完成标记。如果去掉后为空（LLM 只回了【完成】），从上下文构建有意义回复。"""
         stripped = text.replace(_COMPLETION_MARKER, "").strip()
         if stripped:
             return stripped
-        # LLM 只回了【完成】标记 → 返回一个友好的完成提示
+        # LLM 只回了【完成】标记 → 从上下文构建回复
+        if ctx and ctx.tools_called > 0:
+            # 从消息历史中提取最后的工具调用结果
+            for m in reversed(ctx.messages):
+                if hasattr(m, 'content') and isinstance(getattr(m, 'content', None), list):
+                    for part in m.content:
+                        if hasattr(part, 'type') and part.type == 'tool_result':
+                            return f"任务已完成，工具调用结果如上所示。"
+            return f"已完成。调用了 {ctx.tools_called} 次工具。"
         return "已执行完成。"
 
     def _inject_completion_reminder(self, messages: list[dict], iteration: int) -> None:
@@ -1681,6 +1881,8 @@ class Agent:
             return {s[i:i+n] for i in range(len(s)-n+1)} if len(s) >= n else set()
 
         _already_remembered_shingles = set()
+        action_count = 0
+        max_actions = 5
         for m in openai_messages:
             if m["role"] == "assistant" and "tool_calls" in m:
                 for tc in m["tool_calls"]:
@@ -1980,6 +2182,8 @@ class Agent:
 
         # 方式 1: 从工具调用参数提取（最准确，LLM 已解析出正确文件名）
         path_str = ""
+        action_count = 0
+        max_actions = 5
         for m in openai_messages:
             if isinstance(m, dict) and m.get("role") == "assistant" and "tool_calls" in m:
                 for tc in m["tool_calls"]:
@@ -2008,6 +2212,54 @@ class Agent:
             return {"path": str(p), "exists": False, "empty": True}
         size = p.stat().st_size
         return {"path": str(p), "exists": True, "empty": size == 0}
+
+    def _check_tool_permission(self, tool_name: str, args: dict) -> bool:
+        """风险分级权限检查
+
+        对标 OpenWorker `coworker/permissions.py: PermissionEngine.evaluate()`。
+
+        策略（同 engine.py `TurnEngine._check_permission()`）：
+        ┌───────────────┬──────────┬──────────┬──────────┐
+        │ RiskClass     │ DISCUSS  │ INTERACT │ AUTO     │
+        ├───────────────┼──────────┼──────────┼──────────┤
+        │ READ          │ ✅ 允许  │ ✅ 允许  │ ✅ 允许  │
+        │ WRITE_LOCAL   │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        │ EXEC          │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        │ EXTERNAL      │ ❌ 拒绝  │ 需审批   │ ✅ 允许  │
+        └───────────────┴──────────┴──────────┴──────────┘
+
+        Args:
+            tool_name: 工具名
+            args: 调用参数
+
+        Returns:
+            True = 允许执行，False = 拒绝
+        """
+        risk = _classify_risk(tool_name)
+
+        # AUTO 模式：全部放权
+        if self.mode == Mode.AUTO:
+            return True
+
+        # DISCUSS 模式：只允许 READ 风险
+        if self.mode == Mode.DISCUSS:
+            return risk == RiskClass.READ
+
+        # INTERACTIVE 模式：READ 自动允许
+        if not is_consequential(risk):
+            return True
+
+        # EXEC 工具额外检测 shell 操作符（v0.22: 仅记录不拦截，避免误拦 `2>&1`/`\|` 等正常命令）
+        if risk == RiskClass.EXEC and tool_name == "shell":
+            command = str(args.get("command", ""))
+            if has_shell_operators(command):
+                logger.warning("⚠️ Shell含操作符（已放行）: %s", command[:80])
+
+        # 非 READ 工具在 INTERACTIVE 模式下可放行（当前无前端弹窗，统一放行）
+        # 🔥 与 engine.py 不同：Agent 主循环没有 approver 回调，
+        # 有操作符的 shell 已在上一步拦截，其余非 READ 工具日志记录
+        logger.info("🔓 %s (risk=%s) 已放行 (mode=%s)", tool_name, risk.value, self.mode.value)
+        return True
 
     def _error_result(self, ctx: AgentContext, error_msg: str) -> dict:
         """Return a structured error result."""

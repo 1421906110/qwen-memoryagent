@@ -134,11 +134,13 @@ class ToolRegistry:
         手动模式（两种风格均可）:
             # 🔥 新风格（推荐）
             registry.register(name="x", description="...",
-                              parameters={...}, executor=func)
+                              parameters={...}, executor=func,
+                              risk_level=None, category="general")
 
             # 🔥 旧风格（兼容，v0.17 legacy）
             registry.register("name", "description", parameters, executor,
-                              tool_type="builtin", category="general")
+                              tool_type="builtin", category="general",
+                              risk_level=None)
 
         Args:
             *args: 旧风格位置参数 (name, description, parameters, executor)
@@ -150,10 +152,14 @@ class ToolRegistry:
                 executor: 手动模式时执行函数
                 tool_type: 工具类型（builtin/module）
                 category: 工具分类
+                risk_level: 风险等级（自动从 risk.py 查出，也可手动指定）
 
         Returns:
             装饰器模式返回原函数，手动模式返回 None
         """
+        # 导入风险分级（延迟导入避免循环依赖）
+        from .risk import classify as _classify_risk
+
         # ── 检测调用风格 ──
         # 旧风格：register("name", "desc", params, executor, ...)
         if len(args) >= 2:
@@ -177,6 +183,7 @@ class ToolRegistry:
                 "func": executor,
                 "type": tool_type,
                 "category": category,
+                "risk_level": _classify_risk(name, category).value,
             }
             self._categories.setdefault(category, []).append(name)
             logger.debug("🔧 Registered tool (legacy style): %s", name)
@@ -209,6 +216,7 @@ class ToolRegistry:
                 "func": func,
                 "type": tool_type,
                 "category": category,
+                "risk_level": _classify_risk(name, category).value,
             }
             self._categories.setdefault(category, []).append(name)
             logger.debug("🔧 Registered tool (auto-schema): %s", name)
@@ -217,6 +225,10 @@ class ToolRegistry:
         # 手动模式
         if not name or not executor:
             raise ValueError("手动注册需要 name 和 executor")
+
+        risk_level = kwargs.pop("risk_level", None)
+        if risk_level is None:
+            risk_level = _classify_risk(name, category).value
 
         schema = {
             "type": "function",
@@ -232,9 +244,10 @@ class ToolRegistry:
             "func": executor,
             "type": tool_type,
             "category": category,
+            "risk_level": risk_level,
         }
         self._categories.setdefault(category, []).append(name)
-        logger.debug("🔧 Registered tool (manual): %s", name)
+        logger.debug("🔧 Registered tool (manual): %s, risk=%s", name, risk_level)
         return None
 
     @property
@@ -255,7 +268,8 @@ class ToolRegistry:
     def list_for_ui(self) -> list[dict]:
         return [
             {"name": t["name"], "description": t["schema"]["function"]["description"],
-             "type": t["type"], "category": t["category"]}
+             "type": t["type"], "category": t["category"],
+             "risk_level": t.get("risk_level", "read")}
             for t in self._tools.values()
         ]
 

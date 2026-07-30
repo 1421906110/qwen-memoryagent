@@ -385,6 +385,7 @@ class LLMClient:
         if max_tokens is None:
             max_tokens = self._cfg["max_tokens"]
 
+        _t0 = time.time()
         resp = _api_call_with_retry(
             lambda: self.client.chat.completions.create(
                 model=model or self.model,
@@ -394,6 +395,8 @@ class LLMClient:
                 extra_body=extra or None,
             )
         )
+        _elapsed = time.time() - _t0
+        logger.info("📊 LLM chat() 耗时: %.1fs, 模型=%s, thinking=%s", _elapsed, model or self.model, extra.get("thinking"))
         return resp.choices[0].message.content or ""
 
     def chat_completion(
@@ -444,10 +447,11 @@ class LLMClient:
         max_tokens: int | None = None,
         model: str | None = None,
         enable_search: bool | None = None,
+        enable_thinking: bool | None = None,
     ):
         """流式聊天。简单问答场景用 fast_model。
 
-        DeepSeek: 自动加 stream_options 获取 token 用量。
+        DeepSeek: enable_thinking=False 关闭 thinking（简单问答）。默认为 True。
         Qwen: 自动检测是否需要开启内置搜索。
         """
         full_messages = []
@@ -465,8 +469,8 @@ class LLMClient:
                                                       "动态", "热点"]):
                 extra["enable_search"] = True
 
-        # ⭐ DeepSeek: 流式默认开启思考模式
-        if self._is_deepseek:
+        # 🔥 DeepSeek thinking：简单问答（enable_thinking=False）关闭加快速度
+        if self._is_deepseek and enable_thinking is not False:
             extra["thinking"] = {"type": "enabled"}
             extra["reasoning_effort"] = self._cfg.get("reasoning_effort", "high")
 

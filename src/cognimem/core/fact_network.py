@@ -133,8 +133,9 @@ class FactNetwork:
         添加/更新事实。
 
         1. 去重: 相同三元组 (agent|subject|predicate|object) → 合并
-        2. 矛盾检测: 检查与现有事实的冲突
-        3. 存入缓存
+        2. ⭐ 模糊去重: 语义相似 (predicate+object n-gram >= 0.7) → 合并
+        3. 矛盾检测: 检查与现有事实的冲突
+        4. 存入缓存
 
         Args:
             fact: 事实三元组
@@ -149,6 +150,13 @@ class FactNetwork:
             if existing:
                 # 已存在 → 合并 (增加证据, 提升置信度)
                 return self._merge_facts(existing, fact, source_type)
+
+            # ⭐ 模糊去重: 语义相似但 triple_key 不同（如"喝冰美式咖啡" vs "冰美式"）
+            similar = self._find_similar(fact)
+            if similar:
+                logger.info("🔀 模糊去重合并: (%s) ≈ (%s)",
+                            similar.object[:30], fact.object[:30])
+                return self._merge_facts(similar, fact, source_type)
 
             # 矛盾检测 (遍历已有事实)
             contradictions = self._detect_contradictions(fact)
@@ -1083,6 +1091,56 @@ class FactNetwork:
                 if fact:
                     self._cache_put(fact)
                 return fact
+            return None
+
+    @staticmethod
+    def _calc_shingle_sim(text_a: str, text_b: str, n: int = 2) -> float:
+        """字符 n-gram Jaccard 相似度 + containment 加权。
+
+        对短文本（< n+1 字符）用 containment（子集覆盖度），
+        长文本用 Jaccard。综合取较高值。
+        """
+        if not text_a or not text_b:
+            return 0.0
+        a_grams = {text_a[i:i+n] for i in range(len(text_a)-n+1)} if len(text_a) >= n else {text_a}
+        b_grams = {text_b[i:i+n] for i in range(len(text_b)-n+1)} if len(text_b) >= n else {text_b}
+        if not a_grams or not b_grams:
+            return 0.0
+        inter = a_grams & b_grams
+        union = a_grams | b_grams
+        jaccard = len(inter) / len(union) if union else 0.0
+        # containment: 短文本的 n-gram 有多少被长文本覆盖
+        shorter = a_grams if len(a_grams) <= len(b_grams) else b_grams
+        containment = len(inter) / len(shorter) if shorter else 0.0
+        return max(jaccard, containment)
+
+    def _find_similar(self, fact: FactTriple, threshold: float = 0.7) -> FactTriple | None:
+        """⭐ 模糊去重：查找语义相似（但 triple_key 不同）的已有事实。
+
+        用于 catch「喝冰美式咖啡」vs「冰美式」这类写不同但语义重叠的情况。
+        条件：同 subject + 同 predicate + 同 fact_type，object 用 2-gram containment 比较。
+        """
+        with self._lock:
+            target_text = f"{fact.predicate}{fact.object}"
+            best_score = 0.0
+            best_fact = None
+            for existing in self._get_agent_facts(fact.agent_id):
+                if existing.fact_id == fact.fact_id:
+                    continue
+                # 必须同类型 + 同主体 + 同谓语（防"喜欢"≠"不喜欢"误合并）
+                if existing.fact_type != fact.fact_type:
+                    continue
+                if existing.subject != fact.subject:
+                    continue
+                if existing.predicate != fact.predicate:
+                    continue
+                existing_text = f"{existing.predicate}{existing.object}"
+                score = self._calc_shingle_sim(target_text, existing_text)
+                if score > best_score:
+                    best_score = score
+                    best_fact = existing
+            if best_score >= threshold:
+                return best_fact
             return None
 
     def _get_fact(self, fact_id: str) -> FactTriple | None:
