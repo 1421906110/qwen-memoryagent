@@ -113,6 +113,89 @@ class CogniMem:
 
     # ── 写入 ──
 
+    # ═══════════════════════════════════════════════════════════════
+    # ★ L4 反思框架 — 从错误中自动学习，逐步逼近完美
+    # ═══════════════════════════════════════════════════════════════
+    # 借鉴 self-improving-agent 的反思模式，但直接存储到 SPO 图谱。
+    # 每次发现错误/异常/空结果时，记录一条 lesson 事实。
+    # 后续 recall 时自动加载相关 lesson，避免重复犯错。
+
+    _LESSON_CATEGORIES = {
+        "提取失败": "LLM/规则提取返回空或无意义事实",
+        "用户修正": "用户纠正了系统的输出或记忆",
+        "召回为空": "用户提问但recall返回0条",
+        "工具错误": "工具执行失败",
+        "快照过时": "冻结快照与当前记忆状态不一致",
+    }
+
+    def _store_lesson(self, agent_id: str, category: str,
+                       summary: str, details: str,
+                       source: str = "self_reflection") -> dict:
+        """存储一条经验教训到 SPO 图谱。
+
+        L4 反思框架核心：把错误/失败/异常转化为可检索的 lesson 事实。
+        同类 lesson 重复出现时自动提权。
+
+        Args:
+            agent_id: 归属 agent
+            category: 教训类别（见 _LESSON_CATEGORIES）
+            summary: 一句话总结（作为 predicate/object）
+            details: 详细描述（作为 evidence）
+            source: 来源（"self_reflection"/"user_correction"/"tool_error"）
+        """
+        if category not in self._LESSON_CATEGORIES:
+            category = "提取失败"
+
+        # 先查是否已有同类 lesson（同 summary 视为重复）
+        existing = self.fact_network.recall_by_triple("系统", "学到了", agent_id)
+        for f in existing:
+            if f.object == summary[:100]:
+                # 重复 lesson → 提权 + 更新证据
+                f.confidence = min(f.confidence + 0.1, 0.8)
+                f.importance = min(f.importance + 0.05, 0.8)
+                f.access_count += 1
+                f.evidence.append(EvidenceItem(
+                    source=source,
+                    statement=details[:500],
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ))
+                self.fact_network._cache_put(f)
+                if self.fact_network.db:
+                    try:
+                        self.fact_network.db.update_fact(f)
+                    except Exception:
+                        pass
+                logger.info("📘 Lesson reinforced: %s (conf=%.2f)", summary[:40], f.confidence)
+                return {"status": "reinforced", "fact": f}
+
+        # 新 lesson
+        fact = FactTriple(
+            subject="系统",
+            predicate="学到了",
+            object=summary[:100],
+            agent_id=agent_id,
+            fact_type="lesson",
+            confidence=0.5,
+            importance=0.3,
+            encoding_level="raw",
+            context_tags=["反思", category],
+            source_session=f"lesson:{source}",
+            evidence=[EvidenceItem(
+                source=source,
+                statement=details[:500],
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )],
+        )
+        result = self.fact_network.add_fact(fact)
+        if self.fact_network.db:
+            try:
+                # 写入后使快照失效，下次自动重建
+                self._snapshot.pop(agent_id, None)
+            except Exception:
+                pass
+        logger.info("📘 Lesson stored: %s (cat=%s)", summary[:40], category)
+        return result
+
     # ⭐ 不需要 LLM 提取的文本模式（省 Token 省时间）
     _SKIP_LLM_PATTERNS = [
         r"^完成了一个任务",
@@ -167,12 +250,28 @@ class CogniMem:
                 )
 
         if need_llm:
-            llm_facts = self.llm_extractor.extract(text, source, agent_id)
-            if llm_facts:
-                facts = llm_facts
-                source_type = "agent_inference"
+            try:
+                llm_facts = self.llm_extractor.extract(text, source, agent_id)
+                if llm_facts:
+                    facts = llm_facts
+                    source_type = "agent_inference"
+            except Exception as e:
+                logger.warning("⚠️ LLM extractor failed, using rule-only: %s", str(e)[:80])
 
         if not facts:
+            # 🧠 L4 反思：提取完全失败 → 记录教训
+            _skip_reason = "too_short" if len(text.strip()) < 8 else "no_pattern_match"
+            if _skip_reason == "no_pattern_match":
+                try:
+                    self._store_lesson(
+                        agent_id=agent_id,
+                        category="提取失败",
+                        summary=f"文本\"{text[:30]}…\"无规则匹配且LLM提取返回空",
+                        details=f"source_type={source_type} text_len={len(text)} text={text[:200]}",
+                        source="self_reflection",
+                    )
+                except Exception:
+                    pass
             return {"status": "no_facts_extracted", "facts": []}
 
         # ⭐ 增强证据链：每条事实都带原始来源文本
@@ -451,6 +550,22 @@ class CogniMem:
             ctx["session_id"] = session_id
         facts = self.recall_router.recall(query, agent_id, ctx, top_k)
         pending_contradictions = self.fact_network.get_contradictions(agent_id)
+
+        # 🧠 L4 反思：用户提问但 recall 为空 → 记录教训（过滤问候/短句）
+        _is_greeting = query.strip() in ("你好", "hi", "hello", "hey", "在吗", "")
+        if not facts and len(query) > 6 and not _is_greeting and agent_id:
+            _lesson_facts = [f for f in facts if f.fact_type == "lesson"]
+            if not _lesson_facts:
+                try:
+                    self._store_lesson(
+                        agent_id=agent_id,
+                        category="召回为空",
+                        summary=f"查询\"{query[:25]}…\"召回0条相关记忆",
+                        details=f"query_len={len(query)} top_k={top_k}",
+                        source="self_reflection",
+                    )
+                except Exception:
+                    pass
 
         return {
             "facts": facts,

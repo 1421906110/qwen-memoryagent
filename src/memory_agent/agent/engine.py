@@ -412,6 +412,19 @@ class TurnEngine:
         # 超轮次保护
         _last_text = turn.get("text", "") if iterations > 0 else ""
         _last_text = _clean_xml(_last_text) if _last_text else _last_text
+        # 🧠 L4 反思：超轮次 → 记录教训（防止下次同样问题）
+        if iterations >= self.max_iterations and self._cogni:
+            try:
+                if hasattr(self._cogni, '_store_lesson'):
+                    self._cogni._store_lesson(
+                        agent_id=self._agent_id,
+                        category="工具错误",
+                        summary=f"Agent循环{iterations}轮未完成(超轮次)",
+                        details=f"tools_called={tools_called} max_iterations={self.max_iterations}",
+                        source="self_reflection",
+                    )
+            except Exception:
+                pass
         return TurnResult(
             reply=_last_text or ("已尽力，但未完成..." if tools_called else ""),
             iterations=iterations,

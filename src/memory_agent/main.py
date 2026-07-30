@@ -1027,16 +1027,27 @@ def _maybe_store_memory(cogni, req, source_prefix: str = "chat"):
         if not should_store:
             return
         source = f"{source_prefix}:{req.session_id}" if req.session_id else source_prefix
-        cogni.remember(
+        result = cogni.remember(
             text=req.message,
             agent_id=req.agent_id,
             source=source,
             source_type=source_type,
         )
+        # 🧠 L4 反思：存储返回 0 事实 → 记录教训
+        if result and result.get("status") == "no_facts_extracted":
+            if hasattr(cogni, '_store_lesson'):
+                cogni._store_lesson(
+                    agent_id=req.agent_id,
+                    category="提取失败",
+                    summary=f"存储\"{req.message[:25]}…\"失败：提取0个事实",
+                    details=f"source_type={source_type} session={req.session_id}",
+                    source="self_reflection",
+                )
         # 🐛 v0.27 修复：存记忆后刷新快照（导航 recall → 全部事实）
         # 确保后续 turn 能立即看到新存的信息
         cogni.refresh_snapshot(req.agent_id, session_id=req.session_id)
-    except Exception:
+    except Exception as e:
+        logger.warning("⚠️ _maybe_store_memory failed: %s", str(e)[:80])
         pass
 
 

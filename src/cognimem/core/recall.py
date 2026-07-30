@@ -702,6 +702,17 @@ class RecallRouter:
             if f.fact_type == "narrative":
                 s += 0.06  # 叙事事实小幅提权
 
+            # 🧠 L4 ⑭ 访问频率提权 — 行为模式学习
+            # 用户频繁访问的事实类型 → 自动提权
+            if f.access_count > 5:
+                s += min(f.access_count * 0.005, 0.08)
+            if f.access_count > 20:
+                s += 0.05
+
+            # 🧠 L4 ⑮ 教训事实小幅提权
+            if f.fact_type == "lesson":
+                s += 0.04
+
             return s
 
         # ★ P1-3: 知识库过滤 — 普通召回不返回 credential 类型的事实
