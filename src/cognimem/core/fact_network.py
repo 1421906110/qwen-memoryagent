@@ -11,6 +11,7 @@ CogniMem 核心引擎 — 事实网络
 
 import logging
 import json
+import re
 import threading
 import time
 import math
@@ -682,6 +683,73 @@ class FactNetwork:
                 logger.error(f"❌ Abstraction step failed: {e}", exc_info=True)
                 results["abstracted"] = 0
 
+            # 🆕 v0.25 1.5: 情感汇总
+            # 将同实体的多条「评价」事实汇总为一条情感倾向摘要
+            # (苹果, 评价, 正面)×2 + (苹果, 评价, 负面)×1
+            #   → (用户, 情感倾向, 苹果=正面(好评))
+            try:
+                sentiment_sum = self._summarize_sentiments(agent_id)
+                results["sentiment_summarized"] = sentiment_sum
+            except Exception as e:
+                logger.error(f"❌ Sentiment summary failed: {e}", exc_info=True)
+                results["sentiment_summarized"] = 0
+
+            # 🆕 v0.26 1.7: 垃圾三元组清理（低质量提取的补救）
+            # 检测并删除/降级以下模式：
+            # - "用户 说了 记录N：..." → 纯噪声wrapper
+            # - subject含标点或明显截断（如"目Alpha"缺"项目"的"项"）
+            #   → 降级置信度，让BM25不优先命中
+            try:
+                _garbage_removed = 0
+                _garbage_demoted = 0
+                for f in self._get_agent_facts(agent_id):
+                    if f.encoding_level in ("core", "abstraction"):
+                        continue
+                    # 1.7a: "用户 说了 记录N" 纯噪声
+                    if f.subject == "用户" and f.predicate == "说了" and re.match(r'记录\d', f.object):
+                        if f.evidence and any(len(ev.statement) > 50 for ev in f.evidence):
+                            # 有原文证据 → 降置信度，不删除（保留evidence可搜）
+                            self._update_confidence(f, -0.2, "garbage_wrapper",
+                                                    source_type="garbage_cleanup")
+                            f.importance = 0.1
+                            _garbage_demoted += 1
+                        else:
+                            # 无有价值证据 → 直接删除
+                            self._delete_fact(f.fact_id)
+                            _garbage_removed += 1
+                        continue
+                    # 1.7b: subject截断检测 — 以"目Alpha"等非正常起始字开头
+                    _bad_starts = frozenset("目信家房门客书桌城")
+                    if f.subject and len(f.subject) >= 4 and f.subject[0] in _bad_starts:
+                        # 倒查完整词：evidence中有无"项目Alpha"这类补全
+                        _full_version_found = False
+                        if f.evidence:
+                            for _ev in f.evidence:
+                                if _ev.statement and f.subject in _ev.statement:
+                                    # 检查evidence中该词的上下文
+                                    _idx = _ev.statement.find(f.subject)
+                                    if _idx > 0:
+                                        _prev = _ev.statement[_idx-2:_idx]
+                                        # 前一个词是常见前缀 → 降级（提取错误）
+                                        if any(_prev.endswith(p) for p in ("的", "项", "这", "那", "该")):
+                                            self._update_confidence(f, -0.25, "garbage_truncated",
+                                                                    source_type="garbage_cleanup")
+                                            f.importance = 0.1
+                                            _garbage_demoted += 1
+                                            _full_version_found = True
+                                            break
+                        if not _full_version_found and f.confidence < 0.5:
+                            self._delete_fact(f.fact_id)
+                            _garbage_removed += 1
+                results["garbage_cleaned"] = _garbage_removed
+                results["garbage_demoted"] = _garbage_demoted
+                if _garbage_removed or _garbage_demoted:
+                    logger.info("🧹 Garbage cleanup: removed=%d demoted=%d for '%s'",
+                                _garbage_removed, _garbage_demoted, agent_id)
+            except Exception as e:
+                logger.error(f"❌ Garbage cleanup failed: {e}", exc_info=True)
+                results["garbage_cleaned"] = 0
+
             # 2. 重复合并：完全相同三元组 → 去重
             try:
                 groups = defaultdict(list)
@@ -897,6 +965,97 @@ class FactNetwork:
 
         return results
 
+    # ═══ v0.25: 情感汇总 ═══
+
+    def _summarize_sentiments(self, agent_id: str) -> int:
+        """
+        汇总同实体的多条评价事实，生成情感倾向摘要。
+
+        输入：
+          (苹果, 评价, 正面, conf=0.48)
+          (苹果, 评价, 正面, conf=0.54)
+          (小米, 评价, 负面, conf=0.60)
+        输出：
+          (用户, 情感倾向, 苹果=正面(好评), conf=0.65)
+          (用户, 情感倾向, 小米=负面(差评), conf=0.70)
+
+        Returns: 生成的摘要数
+        """
+        from collections import defaultdict
+        all_facts = self._get_agent_facts(agent_id)
+
+        # 找所有评价类情感事实（按实体归类）
+        sentiment_facts = [
+            f for f in all_facts
+            if f.predicate == "评价"
+            and f.fact_type in ("preference", "observation")
+            and "情感" in f.context_tags
+        ]
+        if len(sentiment_facts) < 3:
+            return 0  # 数据太少不做汇总
+
+        # 按实体分组
+        by_entity = defaultdict(list)
+        for f in sentiment_facts:
+            by_entity[f.subject].append(f)
+
+        summarized = 0
+        for entity, facts in by_entity.items():
+            if entity in ("用户", "你", "我", "您"):
+                continue
+            if len(facts) < 2:
+                continue
+
+            pos_count = sum(1 for f in facts if f.object == "正面")
+            neg_count = sum(1 for f in facts if f.object == "负面")
+            total = pos_count + neg_count
+            if total == 0:
+                continue
+
+            avg_conf = sum(f.confidence for f in facts) / total
+            pos_ratio = pos_count / total
+
+            if pos_ratio >= 0.75:
+                verdict = f"{entity}=正面(好评)"
+            elif pos_ratio <= 0.25:
+                verdict = f"{entity}=负面(差评)"
+            else:
+                verdict = f"{entity}=矛盾({pos_count}正/{neg_count}负)"
+
+            # 创建情感摘要抽象事实
+            abstract = FactTriple(
+                subject="用户",
+                predicate="情感倾向",
+                object=verdict,
+                agent_id=agent_id,
+                fact_type="observation",
+                confidence=min(0.8, avg_conf * 1.15),
+                importance=0.6,
+                encoding_level="abstraction",
+                context_tags=["情感", "情感汇总"],
+                connected_facts=[f.fact_id for f in facts],
+                evidence=[EvidenceItem(
+                    source="memory_abstraction",
+                    statement=f"汇总自{len(facts)}条情感事实: {entity} {pos_count}次正面/{neg_count}次负面",
+                )],
+            )
+
+            # 已有相同摘要则跳过
+            existing = self._find_existing(abstract.triple_key)
+            if existing and existing.encoding_level == "abstraction":
+                continue
+
+            self._cache_put(abstract)
+            if self.db:
+                try:
+                    self.db.save_fact(abstract)
+                except Exception:
+                    pass
+            summarized += 1
+            logger.info("📊 情感汇总: %s (%d正/%d负)", entity, pos_count, neg_count)
+
+        return summarized
+
     def _cluster_by_tags(self, group: list[FactTriple]) -> list[list[FactTriple]]:
         """按共享标签将事实聚类（连通分量算法）"""
         if len(group) <= 1:
@@ -936,12 +1095,26 @@ class FactNetwork:
 
         return list(cluster_map.values())
 
+    # 🔥 v0.24: 排除不作为抽象类别的元数据标签
+    _EXCLUDED_ABSTRACTION_TAGS = frozenset({
+        "结构化数据", "长文本", "长文本摘要", "修正", "被修正",
+        "序号", "观察", "observation",
+    })
+
     def _find_category(self, group: list[FactTriple],
                        llm_extractor=None) -> str | None:
-        """为一组事实找到共同上层类别（tags→LLM→词重叠）"""
+        """为一组事实找到共同上层类别（tags→LLM→词重叠）
+
+        v0.24: 排除结构化元标签（"结构化数据"等）作为抽象类别。
+        """
         tag_counts: dict[str, int] = {}
         for f in group:
             for tag in f.context_tags:
+                if tag in self._EXCLUDED_ABSTRACTION_TAGS:
+                    continue
+                # 跳过 #N 格式的序号标签
+                if tag.startswith("#") and tag[1:].isdigit():
+                    continue
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
         shared = [(t, c) for t, c in tag_counts.items() if c >= 2]
         if shared:
@@ -1332,11 +1505,15 @@ class FactNetwork:
             self._stm[agent].append(fact)
             self._stm_timestamps[fact.fact_id] = time.time()
 
-            # FIFO 淘汰：STM 满 → 最旧的先入 LTM（标记为已持久化）
+            # 🆕 v0.25: STM 满 → 优先淘汰低重要性事实（保护紧急指令等高优先级记忆）
             while len(self._stm[agent]) > self._stm_max:
-                oldest = self._stm[agent].pop(0)
-                # 已经在 cache+DB 中（add_fact 做了），只需从 STM 移除
-                self._stm_timestamps.pop(oldest.fact_id, None)
+                _min_imp = min(f.importance for f in self._stm[agent])
+                if _min_imp < 0.9:
+                    _idx = next(i for i, f in enumerate(self._stm[agent]) if f.importance == _min_imp)
+                else:
+                    _idx = 0
+                evicted = self._stm[agent].pop(_idx)
+                self._stm_timestamps.pop(evicted.fact_id, None)
 
     def _get_stm_facts(self, agent_id: str) -> list[FactTriple]:
         """获取 STM 缓冲区的有效事实（清理过期的）。"""

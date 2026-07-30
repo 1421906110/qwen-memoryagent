@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import re
 import logging
 import time
 from collections import OrderedDict
@@ -42,6 +43,16 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger("agent.engine")
+
+
+# ── XML 清洗工具（v0.27: 根治 LLM 输出中的 <tool_calls> 泄漏）──
+def _clean_xml(text: str) -> str:
+    """清理 LLM 输出中模拟 Claude Code 的 XML tool call 格式"""
+    if not text or ('<tool_calls>' not in text and '<invoke' not in text):
+        return text
+    cleaned = re.sub(r'<tool_calls>.*?</tool_calls>', '', text, flags=re.DOTALL)
+    cleaned = re.sub(r'<invoke name=".*?>.*?</invoke>', '', cleaned, flags=re.DOTALL)
+    return cleaned.strip()
 
 
 class Mode(str, Enum):
@@ -200,6 +211,14 @@ class TurnEngine:
         self.narrator = narrator
         self.max_iterations = max_iterations
         self.cache = tool_cache or ToolCache()
+        # 🆕 v0.25: CogniMem context for memory tools
+        self._cogni = None
+        self._agent_id = "default"
+
+    def set_cogni_context(self, cogni, agent_id: str = "default"):
+        """设置 CogniMem 上下文，供工具调用时传递给 AgentContext"""
+        self._cogni = cogni
+        self._agent_id = agent_id
 
         # 中断信号
         self._cancel = asyncio.Event()
@@ -224,13 +243,15 @@ class TurnEngine:
     ) -> TurnResult:
         """执行一轮 Agent 对话
 
-        🔥 省 Token 三件套:
+        🔥 省 Token 五件套:
           1. 无工具 → 直接单次 LLM 调用（省循环开销）
           2. 工具缓存 → 相同参数命中直接返回（0 Token）
           3. 提前退出 → LLM 不调工具立即退出（省后续轮次）
+          4. 消息裁剪 → 超预算时自动裁旧工具记录
+          5. 并发只读工具 → READ 风险工具并行执行（省等待时间）
 
         Args:
-            messages: 当前消息列表
+            messages: 当前消息列表（第一条应为 system prompt）
             user_message: 用户最新消息（日志用）
             has_tools: 是否有工具可用
             temperature: LLM 温度参数
@@ -247,6 +268,8 @@ class TurnEngine:
 
         iterations = 0
         tools_called = 0
+        search_count = 0  # web_search 计数
+        fetch_count = 0   # web_fetch 计数
 
         while iterations < self.max_iterations:
             # 中断检查
@@ -259,6 +282,9 @@ class TurnEngine:
                 )
 
             iterations += 1
+
+            # 🔥 消息裁剪：超预算时自动裁旧工具记录
+            messages = self._prune_messages(messages)
 
             # ── LLM 调用 ──
             try:
@@ -274,56 +300,120 @@ class TurnEngine:
 
             # 🔥 提前退出：没有 tool_calls → 直接输出回复
             if not turn.get("tool_calls"):
+                _reply = _clean_xml(turn.get("text", ""))
                 return TurnResult(
-                    reply=turn.get("text", ""),
+                    reply=_reply or "",
                     iterations=iterations,
                     tools_called=tools_called,
                 )
+            # 低风险工具（READ）并发跑，高风险（EXEC/WRITE）顺序跑
+            tool_calls = turn["tool_calls"]
+            cleared = []
 
-            # ── 处理工具调用 ──
-            for tc in turn["tool_calls"]:
+            for tc in tool_calls:
                 if self._cancel.is_set():
                     break
-
                 name = tc.get("function", {}).get("name", "")
                 try:
                     args = json.loads(tc.get("function", {}).get("arguments", "{}"))
                 except json.JSONDecodeError:
                     args = {}
-
-                # 权限检查
                 allowed = await self._check_permission(name, args)
-                if not allowed:
-                    continue
+                if allowed:
+                    cleared.append((tc, name, args))
 
-                # 🔥 Narration 进度汇报
+            # ── 拆分为并发组+顺序组 ──
+            if not cleared:
+                # 所有工具都被权限拒绝 → 告知 LLM 避免死循环
+                messages.append({
+                    "role": "user",
+                    "content": "【工具被拒绝】你调用的工具在当前模式下不允许，或含危险操作符。请换用其他方式或改用安全命令。",
+                })
+                continue
+            concurrent_group = [x for x in cleared if self._parallel_safe(x[1])]
+            serial_group = [x for x in cleared if x not in concurrent_group]
+
+            # ── 追加 assistant tool_calls 消息（DeepSeek 必须配对）──
+            _assistant_msg = {
+                "role": "assistant",
+                "content": turn.get("text", ""),
+                "tool_calls": [
+                    {"id": tc[0]["id"], "type": "function",
+                     "function": {"name": tc[0]["function"]["name"],
+                                  "arguments": tc[0]["function"]["arguments"]}}
+                    for tc in cleared
+                ],
+            }
+            # ⭐ DeepSeek thinking: 保留 reasoning_content 回传
+            if turn.get("reasoning_content"):
+                _assistant_msg["reasoning_content"] = turn["reasoning_content"]
+            messages.append(_assistant_msg)
+
+            # ── 并发执行只读工具 ──
+            if concurrent_group:
+                for _, name, args in concurrent_group:
+                    if self.narrator:
+                        narration = _get_narration(name, args)
+                        if narration:
+                            await self.narrator(narration)
+                loop = asyncio.get_running_loop()
+                outcomes = await asyncio.gather(*[
+                    loop.run_in_executor(
+                        None,
+                        functools.partial(self._execute_tool, name, args),
+                    )
+                    for tc, name, args in concurrent_group
+                ])
+                for (tc, name, args), result in zip(concurrent_group, outcomes):
+                    tools_called += 1
+                    self._append_tool_result(messages, tc, name, args, result)
+                    # 跟踪搜索次数
+                    if name == "web_search":
+                        search_count += 1
+                    elif name == "web_fetch":
+                        fetch_count += 1
+
+            # ── 顺序执行高风险工具 ──
+            for tc, name, args in serial_group:
+                if self._cancel.is_set():
+                    break
                 if self.narrator:
                     narration = _get_narration(name, args)
                     if narration:
                         await self.narrator(narration)
 
-                # 🔥 缓存检查
                 cached = self.cache.get(name, args)
                 if cached is not None:
                     result = cached
                     logger.debug("💥 Cache HIT: %s (rate=%.0f%%)",
                                  name, self.cache.stats["hit_rate"] * 100)
                 else:
-                    result = self.registry.execute("", name, args)
+                    loop = asyncio.get_running_loop()
+                    result = await loop.run_in_executor(
+                        None,
+                        functools.partial(self._execute_tool, name, args),
+                    )
                     self.cache.put(name, args, result)
 
                 tools_called += 1
+                self._append_tool_result(messages, tc, name, args, result)
+                if name == "web_search":
+                    search_count += 1
+                elif name == "web_fetch":
+                    fetch_count += 1
 
-                # 追加工具结果到消息列表
+            # 🔥 搜索超限 → 通知 LLM 停止搜索
+            if search_count > 3 or fetch_count > 2:
                 messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.get("id", ""),
-                    "content": json.dumps(result, ensure_ascii=False, default=str)[:2000],
+                    "role": "user",
+                    "content": "【停止搜索】你已经搜索多次了，请根据已有结果直接回复用户。",
                 })
 
         # 超轮次保护
+        _last_text = turn.get("text", "") if iterations > 0 else ""
+        _last_text = _clean_xml(_last_text) if _last_text else _last_text
         return TurnResult(
-            reply="已尽力，但未完成..." if tools_called else "",
+            reply=_last_text or ("已尽力，但未完成..." if tools_called else ""),
             iterations=iterations,
             tools_called=tools_called,
             truncated=True,
@@ -344,16 +434,18 @@ class TurnEngine:
                     temperature=temperature,
                 ),
             )
-            return TurnResult(reply=text or "", iterations=1)
+            # 清理 _simple_turn 返回中的 XML
+            _text = _clean_xml(text or "")
+            return TurnResult(reply=_text or text or "", iterations=1)
         except Exception as e:
             logger.exception("Simple turn failed")
             return TurnResult(reply="抱歉，出错了", iterations=0, error=str(e))
 
     async def _llm_complete(self, messages: list[dict],
                             temperature: float) -> dict:
-        """异步包装 LLM 调用（不阻塞事件循环）"""
+        """异步包装 LLM 调用，返回归一化 dict（兼容 ChatCompletion SDK 对象）"""
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        response = await loop.run_in_executor(
             None,
             functools.partial(
                 self.llm.chat_completion,
@@ -362,6 +454,28 @@ class TurnEngine:
                 temperature=temperature,
             ),
         )
+        # ⭐ 归一化：ChatCompletion SDK 对象 → 简单 dict
+        msg = response.choices[0].message
+        # DeepSeek thinking mode 会返回 reasoning_content，必须保留并回传
+        raw_msg = msg.to_dict() if hasattr(msg, 'to_dict') else msg.model_dump() if hasattr(msg, 'model_dump') else {}
+        reasoning = raw_msg.get("reasoning_content") or getattr(msg, "reasoning_content", None)
+        # 🆕 v0.26: 清理LLM输出中的XML tool_call格式（避免自激循环）
+        _text = _clean_xml(msg.content or "")
+        return {
+            "text": _text,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in (msg.tool_calls or [])
+            ],
+            "reasoning_content": reasoning,
+        }
 
     async def _check_permission(self, tool_name: str, args: dict) -> bool:
         """权限检查 — 基于 RiskClass 风险分级
@@ -412,6 +526,114 @@ class TurnEngine:
 
         # 无审批回调 → 默认拒绝
         return False
+
+    # ── 🔥 v0.23 新增方法：消息裁剪 / 并发安全 / 工具执行 ──
+
+    def _prune_messages(self, messages: list[dict],
+                         max_tokens: int = 24000,
+                         keep_recent: int = 8) -> list[dict]:
+        """消息裁剪：超预算时丢弃旧工具记录，保留最近 + system + 首条 user。
+
+        DeepSeek 要求 tool 消息必须跟在对应 tool_calls 消息后，
+        裁剪时确保 tool_calls 配对不被破坏。
+        """
+        if len(messages) <= 2:
+            return messages
+
+        # 估算 token（中英文混合）
+        def _est(s):
+            en = sum(1 for c in str(s) if ord(c) < 128)
+            cn = len(str(s)) - en
+            return int(en / 4 + cn / 1.5)
+
+        total = sum(_est(m.get("content", "")) for m in messages)
+        if total < max_tokens:
+            return messages
+
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        non_system = [m for m in messages if m.get("role") != "system"]
+
+        if len(non_system) <= keep_recent:
+            return messages
+
+        # 保留：第一条 user + 最近 keep_recent 条
+        first_user = None
+        for m in non_system:
+            if m.get("role") == "user":
+                first_user = m
+                break
+
+        keep = list(system_msgs)
+        if first_user is not None:
+            keep.append(first_user)
+        for m in non_system[-keep_recent:]:
+            if m not in keep:
+                keep.append(m)
+
+        # 补全 tool_calls 配对（DeepSeek 要求）
+        _tool_ids = {m["tool_call_id"] for m in keep
+                     if m.get("role") == "tool" and m.get("tool_call_id")}
+        if _tool_ids:
+            for m in non_system:
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    for tc in m["tool_calls"]:
+                        if tc.get("id") in _tool_ids and m not in keep:
+                            keep.append(m)
+                            break
+
+        dropped = len(messages) - len(keep)
+        if dropped:
+            logger.info("✂️ TurnEngine 裁剪: %d→%d (丢%d条)", len(messages), len(keep), dropped)
+            # 简单摘要被裁剪的消息（替代直接丢弃）
+            _dropped_msgs = [m for m in non_system if m not in keep and m.get("role") in ("user", "assistant")]
+            if _dropped_msgs and self.llm:
+                _ctx = " ".join(m.get("content","")[:100] for m in _dropped_msgs[:5])
+                _summary = self.llm.chat(
+                    messages=[{"role": "system", "content": f"用一句话概括这段对话的核心：{_ctx}"}],
+                    system_prompt=None, temperature=0.3, max_tokens=100,
+                )
+                if _summary:
+                    keep.insert(1, {"role": "user", "content": f"[对话摘要] {_summary.strip()}"})
+                    logger.info("📝 裁剪摘要: %s", _summary.strip()[:80])
+        return keep
+
+    def _parallel_safe(self, tool_name: str) -> bool:
+        """工具是否能并发执行？只有 READ 风险工具可以。
+
+        对标 OpenWorker `_parallel_safe()`：
+        低风险（read_file/list_dir/memory_recall/web_search）并行，
+        write_file/shell 等顺序执行。
+        """
+        from .risk import classify as _classify_risk, RiskClass
+        return _classify_risk(tool_name) == RiskClass.READ
+
+    def _execute_tool(self, name: str, args: dict) -> dict:
+        """同步执行工具，带缓存"""
+        cached = self.cache.get(name, args)
+        if cached is not None:
+            logger.debug("💥 Cache HIT: %s", name)
+            return cached
+        # 🆕 v0.25: 构建 AgentContext 供 memory tools 使用
+        ctx = None
+        if self._cogni:
+            from . import AgentContext
+            ctx = AgentContext(
+                agent_id=self._agent_id,
+                cogni=self._cogni,
+            )
+        result = self.registry.execute("", name, args, ctx=ctx)
+        self.cache.put(name, args, result)
+        return result
+
+    def _append_tool_result(self, messages: list[dict], tc: dict,
+                             name: str, args: dict, result: dict):
+        """追加工具结果到对话历史（确保不超过上下文窗口）"""
+        msg = {
+            "role": "tool",
+            "tool_call_id": tc.get("id", ""),
+            "content": json.dumps(result, ensure_ascii=False, default=str)[:2000],
+        }
+        messages.append(msg)
 
     @property
     def cache_stats(self) -> dict:

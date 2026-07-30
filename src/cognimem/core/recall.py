@@ -395,6 +395,16 @@ class RecallRouter:
                     k1: float = 1.5, b: float = 0.75) -> float:
         """计算单篇文档的 BM25 得分"""
         query_terms = self._tokenize(query)
+        # 🆕 v0.25: 过滤查询中的高频停用词（单字 + 常见虚词）
+        _stop_tokens = frozenset({
+            '我','你','他','她','它','的','了','是','在','有','和','与','就','也','还',
+            '都','要','把','被','让','给','对','从','到','去','来','说','看','想','能',
+            '会','可','以','上','下','前','后','里','外','中','内','间','时','候',
+            '请','问','吗','吧','呢','啊','哦','嗯','哈','呀','啦',
+            '告诉','知道','请问','这个','那个','一个','什么','怎么','为什么',
+            '如何','哪','些','多','少','很','太','非','常','更','最',
+        })
+        query_terms = [t for t in query_terms if t not in _stop_tokens]
         doc_terms = self._tokenize(doc_text)
         dl = len(doc_terms)
         if dl == 0:
@@ -413,17 +423,19 @@ class RecallRouter:
                        top_k: int = 10) -> list[FactTriple]:
         """BM25 关键词检索 — 在缓存的 fact 中做模糊匹配"""
         import math
-        agent_facts = self.fn._get_cached_facts(agent_id)
+        agent_facts = self.fn._get_agent_facts(agent_id)
         if not agent_facts:
             return []
 
         # 预处理：所有文档文本 + 统计
         # 🔥 v0.21.1: 加入 evidence 原文，让「我叫小七」的原文能被「你叫什么名字」检索到
+        # 🔥 v0.24: 加入 context_tags，让修正事实的继承标签可被搜索到
         docs = []
         for f in agent_facts:
             _text = f"{f.subject} {f.predicate} {f.object}"
             _ev = " ".join(ev.statement for ev in f.evidence if ev.statement) if f.evidence else ""
-            docs.append(f"{_text} {_ev}" if _ev else _text)
+            _tags = " ".join(f.context_tags) if f.context_tags else ""
+            docs.append(f"{_text} {_ev} {_tags}" if (_ev or _tags) else _text)
         N = len(docs)
         avg_dl = sum(len(self._tokenize(d)) for d in docs) / max(N, 1)
         doc_freqs: dict[str, int] = {}
@@ -669,12 +681,61 @@ class RecallRouter:
                 if not any(kw in q for kw in _action_kw):
                     s *= 0.2  # 非 action 查询时，action 得分砍到 20%
 
+            # 🔥 v0.24 ⑪ 修正优先级（认知记忆核心！）
+            # 被修正的事实降权，修正后的事实提权
+            if "修正" in f.context_tags:
+                s += 0.10  # 修正后的事实优先
+            if "被修正" in f.context_tags:
+                s *= 0.3   # 被修正的事实几乎不返回
+            if f.confidence < 0.3:
+                s *= 0.5   # 低置信度事实降权
+
+            # 🆕 v0.25 ⑫ 情感事实补偿（推理所得，但极为重要）
+            # 情感事实是推理所得（置信度通常只有0.3-0.5），
+            # 但对偏好/推荐类查询是关键信号
+            if f.predicate == "评价" and "情感" in f.context_tags:
+                # 情感事实虽然置信度低，但对推荐/偏好查询极为重要
+                s += 0.08
+
+            # 🆕 v0.25 ⑬ 叙事类型提权
+            # 叙事事实存的是长文本摘要，应能在相关查询中脱颖而出
+            if f.fact_type == "narrative":
+                s += 0.06  # 叙事事实小幅提权
+
             return s
 
         # ★ P1-3: 知识库过滤 — 普通召回不返回 credential 类型的事实
         facts = [f for f in facts if f.fact_type != "credential"]
 
         facts.sort(key=score, reverse=True)
+
+        # 🆕 v0.25 叙事 connected_facts 展开
+        # 如果召回结果中有叙事事实，把它的 connected_facts 也展开加入
+        narrative_expanded = set(f.fact_id for f in facts)
+        _narrative_facts = [f for f in facts if f.fact_type == "narrative"]
+        for nf in _narrative_facts:
+            for cid in nf.connected_facts:
+                if cid not in narrative_expanded:
+                    cf = self.fn._get_fact(cid)
+                    if cf:
+                        facts.append(cf)
+                        narrative_expanded.add(cid)
+
+        # 🆕 v0.25 数字状态机追踪：检查是否有同主题的收支记录并累加
+        _state_items = [f for f in facts if f.predicate in ('有', '花了', '奖励了', '买了', '赚了', '获得了')]
+        if len(_state_items) >= 2:
+            _numeric_facts = []
+            for f in _state_items:
+                _text = f'{f.predicate} {f.object}'
+                import re as _re
+                _nums = _re.findall(r'\d+', _text)
+                if _nums:
+                    _numeric_facts.append((f, int(_nums[0]), _text))
+            if len(_numeric_facts) >= 2:
+                # 添加一行汇总到 system prompt 风格的提示
+                _parts = [f'{n[2]}' for n in _numeric_facts]
+                logger.info(f'📊 状态机检测: {len(_numeric_facts)}条数值事实: {" | ".join(_parts)}')
+
         trimmed = facts[:top_k]
 
         # 🔥 v0.21.1 非 action 保底：如果 top_k 全是 action 且存在非 action 事实，

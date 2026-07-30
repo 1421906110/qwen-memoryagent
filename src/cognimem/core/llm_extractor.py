@@ -115,8 +115,8 @@ class LLMTripleExtractor:
                 )
                 return cached
 
-        # LLM 提取（超长文本直接走规则 fallback，避免浪费 token + 提取失效）
-        if self.api_key and len(text) <= 400:
+        # LLM 提取（短文本复杂/模糊句子）
+        if self.api_key and len(text) <= 120:
             try:
                 facts = self._llm_extract(text, source, agent_id)
                 if facts:
@@ -127,7 +127,307 @@ class LLMTripleExtractor:
             except Exception as e:
                 logger.warning(f"LLM extract failed, fallback to rules: {e}")
 
+        # 🆕 v0.24: 长文本分段提取（>80字，如档案/故事/长文/结构化数据）
+        if len(text) > 80:
+            facts = self._extract_long_text(text, source, agent_id)
+            if facts:
+                return facts
+
         return self._rule_fallback(text, source, agent_id)
+
+    # ═══ v0.24: 长文本分段提取 ═══
+    def _extract_long_text(self, text: str, source: str,
+                           agent_id: str) -> list[FactTriple]:
+        """⏺ 长文本分段提取策略
+
+        1. 按换行/句号分段
+        2. 规则提取逐段处理
+        3. 生成摘要事实（含原文证据）
+        4. 同时存一条 narrative 类型（原文锚点，用于全文检索）
+        """
+        import re
+        results = []
+
+        # ① 分段：按换行 → 句号 → 逗号 逐级拆分
+        segments = []
+        # 先按换行拆
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            # 长段按句号拆
+            if len(line) > 100:
+                for sent in re.split(r'(?<=[。！？])', line):
+                    sent = sent.strip()
+                    if sent:
+                        segments.append(sent)
+            else:
+                segments.append(line)
+
+        # ② 规则提取逐段处理（0 Token）
+        seen_objects = set()
+        for seg in segments[:80]:  # 最多80段
+            seg_facts = self._simple_rule_extract(seg, source, agent_id)
+            if not seg_facts:
+                # 尝试正则匹配模式（人名+身高+鞋码+宠物等结构）
+                seg_facts = self._extract_structured_segment(seg, source, agent_id)
+            for f in seg_facts:
+                key = (f.subject, f.predicate, f.object)
+                if key not in seen_objects:
+                    seen_objects.add(key)
+                    results.append(f)
+
+        # ③ 生成摘要事实（如果LLM可用）
+        if self.api_key and len(text) <= 2000:
+            try:
+                summary_facts = self._llm_summary_extract(text, source, agent_id)
+                for f in summary_facts:
+                    key = (f.subject, f.predicate, f.object)
+                    if key not in seen_objects:
+                        seen_objects.add(key)
+                        results.append(f)
+            except Exception:
+                pass
+
+        # ④ 存一条全文锚点（用于召回）
+        # 🆕 v0.25: 检测叙事文本 → fact_type="narrative" + 提取人物标签
+        _narrative_tag = "长文本"
+        if not any("narrative" in r.encoding_level for r in results):
+            _is_narrative = self._detect_narrative(text)
+            _characters = self._extract_characters(text) if _is_narrative else []
+            _tags = [_narrative_tag]
+            _ftype = "observation"
+            if _is_narrative:
+                _tags.append("叙事")
+                _tags.extend(_characters)
+                _ftype = "narrative"
+                logger.info("📖 检测到叙事文本: %d字, 角色=%s", len(text), _characters)
+
+            results.append(FactTriple(
+                subject="用户",
+                predicate="提供了",
+                object=text[:500],
+                agent_id=agent_id,
+                fact_type=_ftype,
+                confidence=0.4,
+                importance=0.3,
+                encoding_level="raw",
+                source_session=source,
+                context_tags=_tags,
+                evidence=[EvidenceItem(
+                    source=source or "long_text",
+                    statement=text[:1000],
+                )],
+            ))
+
+        logger.info(
+            "📄 长文本提取: %d字 → %d段 → %d条事实",
+            len(text), len(segments), len(results)
+        )
+        return results
+
+    @staticmethod
+    def _extract_structured_segment(seg: str, source: str,
+                                    agent_id: str) -> list[FactTriple]:
+        """
+        提取结构化片段的模式匹配。
+        "3. 刘八，身高189cm，鞋码38，宠物叫球球"
+        → 提取多条事实，含序号标签
+        """
+        import re
+        facts = []
+        seg = seg.strip()
+        if not seg:
+            return facts
+
+        # 提取序号
+        seq_num = None
+        seq_match = re.match(r'^\s*(\d+)\s*[.、，,\s]\s*', seg)
+        if seq_match:
+            seq_num = int(seq_match.group(1))
+
+        # 去掉序号
+        seg_clean = re.sub(r'^\s*\d+[.、，,\s]\s*', '', seg) if seq_num else seg
+        m = re.search(
+            r'(.{1,6})[，,]\s*身高(\d+)\s*cm\s*[，,]\s*鞋码(\d+)\s*[，,]\s*宠物[叫是](.{1,6})',
+            seg_clean
+        )
+        if m:
+            name = m.group(1).strip()
+            height = m.group(2).strip()
+            shoe = m.group(3).strip()
+            pet = m.group(4).strip()
+
+            tags = ["结构化数据"]
+            if seq_num:
+                tags.append(f"第{seq_num}条")
+                tags.append(f"#{seq_num}")
+
+            fields = [
+                ("身高", f"{height}cm"),
+                ("鞋码", shoe),
+                ("宠物叫", pet),
+            ]
+            for pred, obj in fields:
+                facts.append(FactTriple(
+                    subject=name,
+                    predicate=pred,
+                    object=obj,
+                    agent_id=agent_id,
+                    fact_type="fact",
+                    confidence=0.6,
+                    context_tags=tags,
+                    source_session=source,
+                    evidence=[EvidenceItem(
+                        source=source or "structured",
+                        statement=seg[:300],
+                    )],
+                ))
+
+            # 序号条目
+            if seq_num:
+                facts.append(FactTriple(
+                    subject=f"#{seq_num}",
+                    predicate="姓名",
+                    object=name,
+                    agent_id=agent_id,
+                    fact_type="fact",
+                    confidence=0.7,
+                    context_tags=[f"第{seq_num}条", "序号"],
+                    source_session=source,
+                    evidence=[EvidenceItem(
+                        source=source or "structured",
+                        statement=seg[:300],
+                    )],
+                ))
+        return facts
+
+    # ═══ v0.25: 叙事文本检测 ═══
+
+    @staticmethod
+    def _detect_narrative(text: str) -> bool:
+        """检测文本是否为叙事（小说/故事/章节）。
+
+        特征：
+        - 显式章节标记（第一章/Chapter 1）→ 短文本也触发
+        - 高频对话标记（："" 等）→ 需中等长度
+        - 叙事关键词（故事/小说/情节）→ 需中等长度
+        """
+        # 显式章节标记：短文本也立即触发
+        if re.search(r'第[一二三四五六七八九十\d]+[章节回部]', text):
+            return True
+        # 对话/叙事关键词需要文本有一定长度
+        if len(text) < 80:
+            return False
+        # 对话标记：冒号+引号高频出现
+        dialogues = text.count("：") + text.count("「") + text.count("『")
+        dialogues += text.count("\"") + text.count("\"")  # 中文引号
+        if dialogues >= 4 and len(text) >= 300:
+            return True
+        # 叙事关键词
+        narrative_kw = {"故事", "小说", "情节", "序章", "尾声", "番外",
+                        "回忆", "梦境", "传说"}
+        if any(kw in text for kw in narrative_kw):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_characters(text: str) -> list[str]:
+        """从叙事文本中提取可能的人物名（2字，出现≥2次，非停用词）。"""
+        from collections import Counter
+        import re
+        bigrams = re.findall(r'[一-鿿]{2}', text)
+        if not bigrams:
+            return []
+        counter = Counter(bigrams)
+        stopwords = frozenset({
+            "一个", "没有", "我们", "他们", "自己", "这个", "那个", "什么",
+            "怎么", "可以", "知道", "就是", "不是", "但是", "因为", "所以",
+            "如果", "虽然", "而且", "只有", "还是", "已经", "开始", "之后",
+            "时候", "突然", "然后", "起来", "出现", "发现", "看见", "听到",
+            "觉得", "感觉", "开口", "询问", "回答", "离开", "走进", "走出",
+            "先生", "小姐", "女士", "主人", "对方", "眼前", "身后",
+            "心中", "手上", "脚下", "面前", "这时", "那时", "原来",
+            "房间", "门口", "桌子", "椅子", "沙发", "床上", "地上",
+            "其中", "之后", "之前", "以上", "以下", "以外", "以内",
+            "慢慢", "快速", "轻轻", "狠狠", "大声", "小声",
+            "说话", "说道", "开口", "闭口", "回头", "转身", "抬头",
+        })
+        chars = []
+        for word, count in counter.most_common():
+            if count >= 2 and word not in stopwords and len(word) == 2:
+                chars.append(word)
+                if len(chars) >= 4:
+                    break
+        return chars
+
+    def _llm_summary_extract(self, text: str, source: str,
+                              agent_id: str) -> list[FactTriple]:
+        """用LLM从长文本中提取关键事实摘要"""
+        import json, openai
+
+        client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url,
+        )
+
+        prompt = (
+            f"以下是用户提供的一段长文本。从中提取3-5个最关键的事实，"
+            f"以JSON数组格式返回。\n\n"
+            f"文本：{text[:1500]}\n\n"
+            f"返回格式：\n"
+            f'[{{"predicate":"喜欢","object":"喝冰美式","fact_type":"preference"}}, ...]\n'
+            f"要求：\n"
+            f"- predicate用简洁中文动词（喜欢/是/在/有/想/有/会/去/做等）\n"
+            f"- object为事实客体（不超过20字）\n"
+            f"- fact_type为preference/fact/goal/observation之一\n"
+            f"- 只提取明确的事实，不编造\n"
+            f"- 最多5条"
+        )
+
+        try:
+            r = client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "你是一个长文本事实提取器。只返回JSON数组。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1, max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            content = r.choices[0].message.content or "[]"
+            data = json.loads(content)
+            triples = data if isinstance(data, list) else data.get("triples", data.get("facts", []))
+
+            facts = []
+            for item in triples[:5]:
+                if not isinstance(item, dict):
+                    continue
+                pred = str(item.get("predicate", "")).strip()
+                obj = str(item.get("object", "")).strip()
+                ftype = str(item.get("fact_type", "observation"))
+                if pred and obj:
+                    facts.append(FactTriple(
+                        subject="用户",
+                        predicate=pred,
+                        object=obj[:60],
+                        agent_id=agent_id,
+                        fact_type=ftype if ftype in {
+                            "preference", "fact", "goal", "decision",
+                            "observation", "skill", "narrative",
+                        } else "observation",
+                        confidence=0.5,
+                        source_session=source,
+                        context_tags=["长文本摘要"],
+                        evidence=[EvidenceItem(
+                            source=source or "llm_summary",
+                            statement=text[:500],
+                        )],
+                    ))
+            return facts
+        except Exception as e:
+            logger.debug(f"LLM summary extract failed: {e}")
+            return []
 
     # ── LLM 提取 ──
 
@@ -233,7 +533,7 @@ class LLMTripleExtractor:
                     agent_id=agent_id,
                     fact_type=fact_type if fact_type in {
                         "preference", "fact", "goal", "decision",
-                        "observation", "skill"
+                        "observation", "skill", "narrative",
                     } else "observation",
                     importance=min(1.0, max(0.1, importance)),
                     context_tags=tags[:5],
@@ -284,6 +584,8 @@ class LLMTripleExtractor:
         (r"今天(?:是|礼拜|星期)?(.+?)(?:[，。！？,.!?]|$)", "今天", "是", 1, "fact"),
         (r"现在(?:是)?(.+?)(?:[，。！？,.!?]|$)", "现在", "时间", 1, "fact"),
         (r"我今年(.+?)(?:[，。！？,.!?]|$)", "用户", "年龄", 1, "fact"),
+        # 我X是Y（X为属性），如：我公司年营收是500万美元
+        (r"我([^，。！？]{2,10})是(.+?)(?:[，。！？,.!?]|$)", "用户", None, 2, "fact"),
         # ── 日常状态类 ──
         (r"我(?:觉得|感觉|认为)(.+?)(?:[，。！？,.!?]|$)", "用户", "感觉", 1, "observation"),
         (r"我(?:最近|这?几天|这段?时间|最近在)(.+?)(?:[，。！？,.!?]|$)", "用户", "最近", 1, "observation"),
@@ -291,6 +593,9 @@ class LLMTripleExtractor:
         (r"我(?:想|想去?)(?:去|学|看|吃|喝|买|玩|做)?(.+?)(?:[，。！？,.!?]|$)", "用户", "想去", 1, "goal"),
         # ── 属性类（我是X / 我在X / 我有X） ──
         (r"我(?:是|系)(?:一[个名位])?(.+?)(?:[，。！？,.!?]|$)", "用户", "是", 1, "fact"),
+        # 我的本职工作是X / 我的专业是X / 我在X就职
+        (r"我的(?:本职工作|专业|职业|工作|本职)(?:是|在)(.+?)(?:[，。！？,.!?]|$)", "用户", "工作是", 1, "fact"),
+        (r"我(?:在)(.+?)(?:就职|任职|工作)(?:[，。！？,.!?]|$)", "用户", "工作在", 1, "fact"),
         (r"我(?:有)(?:一[个些])?(.+?)(?:[，。！？,.!?]|$)", "用户", "有", 1, "fact"),
         (r"我在(.+?)(?:工作|上班|学习|读书)(?:[，。！？,.!?]|$)", "用户", "工作在", 1, "fact"),
         # ── 偏好类 ──
@@ -367,7 +672,7 @@ class LLMTripleExtractor:
                     agent_id=agent_id,
                     fact_type=fact_type if fact_type in {
                         "preference", "fact", "goal", "decision",
-                        "observation", "skill"
+                        "observation", "skill", "narrative",
                     } else "observation",
                     confidence=0.65,
                     importance=0.5,
