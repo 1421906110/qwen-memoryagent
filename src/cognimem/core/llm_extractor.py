@@ -655,6 +655,15 @@ class LLMTripleExtractor:
 
                 subj = _resolve(subject, "用户")
                 pred = _resolve(predicate, "")
+                # 🐛 v0.30: predicate=None 时用 group(1)（属性名）当动态谓词
+                #   "我公司年营收是500万美元" → (用户, 年营收, 500万美元)
+                #   旧代码 predicate=None → DB NOT NULL 崩溃 → 同批部分写入
+                if not pred:
+                    _g1 = m.group(1) if m.groups() else None
+                    if _g1:
+                        pred = _g1.strip()
+                if not pred:
+                    continue
                 obj = m.group(obj_group).strip() if isinstance(obj_group, int) else _resolve(obj_group, "")
                 if not obj or len(obj) > 40:
                     continue

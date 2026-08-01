@@ -305,23 +305,35 @@ class BackgroundScheduler:
                             fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
                             fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
                             if fa and fb:
-                                pairs.append((fa.to_dict(), fb.to_dict()))
+                                pairs.append((fa, fb))  # 🐛 保存对象本身，与 verdicts 严格对齐
 
                         if pairs:
-                            verdicts = verifier.batch_verify(pairs, agent_id=agent_id)
+                            verdicts = verifier.batch_verify(
+                                [(fa.to_dict(), fb.to_dict()) for fa, fb in pairs],
+                                agent_id=agent_id,
+                            )
+                            fn = self.cogni.fact_network
                             resolved = 0
-                            for verdict, c in zip(verdicts, contradictions_list[:5]):
+                            # 🐛 修复: zip 必须对齐 pairs（pairs 已过滤缺失，长度可能 < contradictions_list[:5]，
+                            #    旧代码 zip 错位会把 verdict 应用到错误的 contradiction 上）
+                            for verdict, (fa, fb) in zip(verdicts, pairs):
                                 if verdict.error or not verdict.winner_id:
                                     continue
                                 resolved += 1
-                                fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
-                                fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
-                                if verdict.winner_id == c.fact_a_id and fa and fb:
-                                    self.cogni.fact_network._update_confidence(c.fact_a_id, min(1.0, fa.confidence + 0.15))
-                                    self.cogni.fact_network._update_confidence(c.fact_b_id, max(0.0, fb.confidence - 0.10))
-                                elif fa and fb:
-                                    self.cogni.fact_network._update_confidence(c.fact_b_id, min(1.0, fb.confidence + 0.15))
-                                    self.cogni.fact_network._update_confidence(c.fact_a_id, max(0.0, fa.confidence - 0.10))
+                                # 🐛 修复: _update_confidence 签名是 (FactTriple, delta, reason)，
+                                #    delta 是增量不是绝对值；旧代码传 fact_id+绝对值 → AttributeError/缺参
+                                if verdict.winner_id == fa.fact_id:
+                                    fn._update_confidence(fa, 0.15, "scheduler_contradiction_verdict")
+                                    fn._update_confidence(fb, -0.10, "scheduler_contradiction_verdict")
+                                else:
+                                    fn._update_confidence(fb, 0.15, "scheduler_contradiction_verdict")
+                                    fn._update_confidence(fa, -0.10, "scheduler_contradiction_verdict")
+                                # 🐛 v0.30: 裁决置信度必须落库（只改内存缓存 → 重启还原）
+                                for _f in (fa, fb):
+                                    try:
+                                        fn.db.update_fact(_f)
+                                    except Exception:
+                                        pass
                             if resolved:
                                 logger.info("🔍 调度器批量矛盾解析(%s): 解决 %d/%d 对 (1次LLM)", agent_id, resolved, len(pairs))
                     except Exception as e:

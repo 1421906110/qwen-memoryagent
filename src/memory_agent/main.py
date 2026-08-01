@@ -475,7 +475,7 @@ class RecallRequest(BaseModel):
     agent_id: str = Field(..., min_length=1)
     query: str | None = None
     memory_types: list[str] | None = None
-    limit: int = 10
+    limit: int = 15  # v0.28: 10→15 匹配 top_k，避免低分事实被切
     min_confidence: float = 0.0
 
 
@@ -726,7 +726,9 @@ def _build_context(
         # ── L3: CogniMem 图谱召回（跨会话持久 + 本会话事实）──
         if cogni:
             try:
-                result = cogni.recall(query=user_message, agent_id=agent_id, top_k=8, session_id=session_id)
+                # 🐛 v0.28: top_k=8 会切掉排在后面的决策类事实（如K3s排第9）。
+                # 改为 top_k=15 匹配渲染上限（12行），确保所有可渲染事实都能参加排序
+                result = cogni.recall(query=user_message, agent_id=agent_id, top_k=15, session_id=session_id)
                 recalled = [f.to_dict() for f in result.get("facts", [])]
             except Exception as e:
                 logger.warning("Memory recall failed: %s", e)
@@ -826,7 +828,7 @@ def _build_context(
 
     if recalled:
         # ⭐ 记忆治理评分 + 类型多样化排序（对标 _score_memory）
-        _type_priority = {"preference": 3, "goal": 2, "fact": 2, "decision": 2, "observation": 1, "action": 0}
+        _type_priority = {"preference": 3, "goal": 2, "fact": 2, "decision": 3, "skill": 2, "observation": 1, "action": 0}
         def _gov_score(f):
             base = f.get("confidence", 0.5) * f.get("importance", 0.5)
             tp = _type_priority.get(f.get("fact_type", "observation"), 1)
@@ -846,7 +848,7 @@ def _build_context(
             is_seq = s.startswith("#") and len(s) <= 5
             if not is_seq:
                 seen_types.setdefault(ft, 0)
-                if seen_types[ft] >= 4:
+                if seen_types[ft] >= 6:  # v0.28: 从4扩到6，避免fact/obs类型事实被切
                     continue
             s = f.get("subject", "")
             p = f.get("predicate", "")
@@ -873,9 +875,29 @@ def _build_context(
                 _line = f"- 第{s[1:]}条: {p}={o}"
             else:
                 _line = f"- {s}{p}{o}"
+            # 🐛 v0.28 修复：三元组乱码回退 — 当主线 render 出明显无效内容时，
+            # 用 evidence 中的原文替代（确保原始信息不丢失）
+            if s and p and o:
+                _is_garbled = (
+                    len(s) > 6  # 主语过长（我上周参加了深圳）
+                    or (len(p) >= 3 and sum(1 for c in p if ord(c) < 128) > len(p) * 0.5)  # predicate 为英文碎片
+                )
+                if _is_garbled:
+                    _ev = f.get("evidence", [])
+                    if _ev and isinstance(_ev, list):
+                        _first = _ev[0] if isinstance(_ev[0], dict) else {}
+                        _st = _first.get("statement", "")[:120]
+                        if _st:
+                            _line = f"- 📌 {_st}"
             # 🔥 v0.21.1 修复：只过滤主语中的昵称（AI自指），不屏蔽用户知识
             # 例如：fact「用户 是 小七」→ object=小七，但这是用户的名字，不应跳过
             # 只有「小智 是 AI」「小智 负责 聊天」这种才跳过
+            # 🐛 v0.28: 跳过情感误提取垃圾事实（"其实我不 评价 负面""我不喜欢 评价 负面"）
+            if p == "评价" and ft in ("preference", "observation"):
+                continue
+            # 主语超长(>6)且非标准主语 → 模式误匹配（"我上周参加了深圳"等）
+            if s and s not in ("你", "用户", "我") and len(s) > 6:
+                continue
             if any(kw in s for kw in ["小七", "小智", "小可爱"]):
                 continue
             conf = f.get("confidence", 0.5)
@@ -891,7 +913,7 @@ def _build_context(
             lines.append(_line)
             if not is_seq:
                 seen_types[ft] = seen_types.get(ft, 0) + 1
-            if len(lines) >= 12:  # v0.24: 从4扩大到12（简单路径不再调memory_recall）
+            if len(lines) >= 15:  # v0.28: 从12扩到15，匹配recall top_k（简单路径不再调memory_recall）
                 break
         if lines:
             # 上下文围栏（参考 Hermes <memory-context> 标签）
@@ -961,6 +983,12 @@ _CORRECTION_KEYWORDS = frozenset({
     "实际是", "其实是", "更正", "修正", "纠正",
     "不是", "不对",
 })
+# 🐛 v0.29 修复(Q5): 遗忘/删除关键词
+_FORGET_KEYWORDS = frozenset({
+    "忘记", "忘掉", "删掉", "删除", "清除",
+    "忘了我说的", "忘了我说", "忘记我说",
+    "不要记", "别记",
+})
 _SELF_REF_KEYWORDS = frozenset({
     "我", "我的", "我是", "我叫", "我喜欢", "我不喜欢",
     "我住在", "我在", "我有", "我没有", "我会",
@@ -968,6 +996,10 @@ _SELF_REF_KEYWORDS = frozenset({
     "我负责", "我工作", "我学习", "我做了", "我完成",
     "我上次", "我之前", "我今年", "我的生日", "我决定",
     "我选择",
+    # 🐛 v0.29 修复(Q6): 时间词开头的自我陈述（"最近搬到X"）
+    "搬到", "搬去", "搬到了", "搬来了",
+    "最近", "刚刚", "昨天", "上周", "上个月",
+    "我家", "我的猫", "我的狗",
 })
 _SKIP_CHAT_KEYWORDS = frozenset({
     "什么", "吗", "？", "?", "谁", "怎么", "如何",
@@ -979,6 +1011,11 @@ _SKIP_CHAT_KEYWORDS = frozenset({
 def _is_correction_intent(text: str) -> bool:
     """检测修正意图：关键词 + 否定过去陈述 + 提供新信息"""
     return any(kw in text for kw in _CORRECTION_KEYWORDS)
+
+
+def _is_forget_intent(text: str) -> bool:
+    """🐛 v0.29 修复(Q5): 检测遗忘意图"""
+    return any(kw in text for kw in _FORGET_KEYWORDS)
 
 
 def _is_small_talk(text: str) -> bool:
@@ -1062,8 +1099,13 @@ def _clean_tool_call_xml(text: str) -> str:
         return text
     # 清理 <tool_calls>...</tool_calls> 完整块
     cleaned = re.sub(r'<tool_calls>.*?</tool_calls>', '', text, flags=re.DOTALL)
+    # 🐛 v0.31: 清理未闭合的 <tool_calls> 块（LLM 截断输出时无 </tool_calls>，
+    # 旧正则匹配不到会泄漏）——顺序必须在闭合块之后，避免误删后续内容
+    cleaned = re.sub(r'<tool_calls>.*', '', cleaned, flags=re.DOTALL)
     # 清理单独的 <invoke name="...">...</invoke>
     cleaned = re.sub(r'<invoke name=".*?>.*?</invoke>', '', cleaned, flags=re.DOTALL)
+    # 🐛 v0.31: 清理未闭合的 <invoke 块（同上，截断输出场景）
+    cleaned = re.sub(r'<invoke name=".*', '', cleaned, flags=re.DOTALL)
     cleaned = cleaned.strip()
     return cleaned or "我不确定，需要什么帮助吗？"
 
@@ -1121,6 +1163,18 @@ async def chat_stream(req: ChatRequest):
         has_url = "http://" in msg or "https://" in msg
         # 简单问答 = 没有文件/执行动作关键词 + 非继续 + 非长文本 + 无URL
         is_simple = (len(msg) < 120) and not has_action and not IS_CONTINUATION and not has_url
+
+        # 🐛 v0.30: stream 路径补遗忘处理（旧代码完全缺失：
+        #   "忘记X"在 stream 下只被存储、不执行遗忘）
+        if cogni and len(msg) > 4 and _is_forget_intent(msg):
+            _result = cogni.forget(msg, req.agent_id)
+            _msg = _result.get("message", "")
+            if _result.get("forgotten", 0) > 0:
+                logger.info("🗑️ Forget processed (stream): %s", _msg)
+            yield f"data: {json.dumps({'type': 'token', 'content': f'好的，{_msg}。'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
+            _record_api_call(success=True)
+            return
 
         # 🔥 v0.24: 在路由决策前就存记忆（不受路径限制）
         if cogni and len(msg) > 4:
@@ -1397,6 +1451,15 @@ async def chat(req: ChatRequest):
     _has_url = "http://" in msg or "https://" in msg
     is_simple = (len(msg) < 120) and not _has_action and not _IS_CONT and not _has_url
 
+    # 🐛 v0.30: 遗忘指令必须在存储之前处理！
+    #   旧顺序：先 _maybe_store_memory 再 forget → "请忘记X"本身先被提取入库
+    if cogni and len(msg) > 4 and _is_forget_intent(msg):
+        _result = cogni.forget(msg, req.agent_id)
+        _msg = _result.get("message", "")
+        if _result.get("forgotten", 0) > 0:
+            logger.info("🗑️ Forget processed: %s", _msg)
+        return {"agent_id": req.agent_id, "reply": f"好的，{_msg}。还有其他需要吗？", "memories_used": 0, "tools_called": 0, "iterations": 0}
+
     # 🔥 v0.24: 在路由决策前就存记忆（不受路径限制）
     if cogni and len(msg) > 4:
         _maybe_store_memory(cogni, req, "chat_pre")
@@ -1413,14 +1476,12 @@ async def chat(req: ChatRequest):
             frozen_system=_frozen_sys,
         )
         _ctx_cache = (system, llm_messages)
-        # 首条消息后冻结 system prompt（免循环import）
+        # 首条消息后冻结 system prompt（导航 recall → 全部事实）
+        # ⭐ freeze_snapshot 内部以空 query 走 navigation recall，
+        #   确保所有事实（含跨会话的observation）都被包含在快照中
         if cogni and not _frozen_sys:
             logger.info("📸 Snapshot frozen for '%s'", req.agent_id)
-            cogni._snapshot[req.agent_id] = {
-                'system': system,
-                'agent_id': req.agent_id,
-                'created_at': time.time(),
-            }
+            cogni.freeze_snapshot(agent_id=req.agent_id, session_id=req.session_id)
             _frozen_sys = True
         _simple_tools_called = 0  # 🔥 v0.23: 简单路径工具计数
         try:
@@ -1516,11 +1577,7 @@ async def chat(req: ChatRequest):
                     frozen_system=_frozen_sys,
                 )
                 if cogni and not _frozen_sys:
-                    cogni._snapshot[req.agent_id] = {
-                        'system': system,
-                        'agent_id': req.agent_id,
-                        'created_at': time.time(),
-                    }
+                    cogni.freeze_snapshot(agent_id=req.agent_id, session_id=req.session_id)
                     _frozen_sys = True
             turn_engine._agent_id = req.agent_id  # 🆕 v0.25: 设置正确的 agent_id
             result = await turn_engine.turn(
@@ -2264,29 +2321,38 @@ async def consolidate(agent_id: str = "default"):
                 fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
                 fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
                 if fa and fb:
-                    pairs.append((fa.to_dict(), fb.to_dict()))
+                    # 🐛 v0.30: 保存 FactTriple 对象本身，与 verdicts 严格对齐
+                    pairs.append((fa, fb))
 
             if pairs:
                 # 🔥 v0.21.1: batch_verify——1次LLM调用处理所有矛盾
-                verdicts = verifier.batch_verify(pairs, agent_id=agent_id)
+                verdicts = verifier.batch_verify(
+                    [(fa.to_dict(), fb.to_dict()) for fa, fb in pairs],
+                    agent_id=agent_id,
+                )
+                fn = cogni.fact_network
                 resolved = 0
 
-                for verdict, c in zip(verdicts, contradictions[:5]):
-                    fa = next((f for f in all_facts if f.fact_id == c.fact_a_id), None)
-                    fb = next((f for f in all_facts if f.fact_id == c.fact_b_id), None)
-                    if not fa or not fb:
-                        continue
+                # 🐛 v0.30: zip 对齐 pairs（旧代码 zip 未过滤的 contradictions → 错配）
+                #   _update_confidence 签名 (FactTriple, delta, reason)，delta 是增量
+                for verdict, (fa, fb) in zip(verdicts, pairs):
                     if verdict.error:
                         logger.warning("矛盾解析失败: %s", verdict.error)
                         continue
                     if verdict.winner_id:
                         resolved += 1
-                        if verdict.winner_id == c.fact_a_id:
-                            cogni.fact_network._update_confidence(c.fact_a_id, min(1.0, fa.confidence + 0.15))
-                            cogni.fact_network._update_confidence(c.fact_b_id, max(0.0, fb.confidence - 0.10))
+                        if verdict.winner_id == fa.fact_id:
+                            fn._update_confidence(fa, 0.15, "consolidate_verdict")
+                            fn._update_confidence(fb, -0.10, "consolidate_verdict")
                         else:
-                            cogni.fact_network._update_confidence(c.fact_b_id, min(1.0, fb.confidence + 0.15))
-                            cogni.fact_network._update_confidence(c.fact_a_id, max(0.0, fa.confidence - 0.10))
+                            fn._update_confidence(fb, 0.15, "consolidate_verdict")
+                            fn._update_confidence(fa, -0.10, "consolidate_verdict")
+                        # 🐛 v0.30: 置信度改动必须落库（只改内存缓存 → 重启后还原）
+                        for _f in (fa, fb):
+                            try:
+                                fn.db.update_fact(_f)
+                            except Exception:
+                                pass
                     verifier_results.append({
                         "fact_a": f"{fa.subject} {fa.predicate} {fa.object}",
                         "fact_b": f"{fb.subject} {fb.predicate} {fb.object}",

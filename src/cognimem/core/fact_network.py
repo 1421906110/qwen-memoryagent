@@ -205,15 +205,31 @@ class FactNetwork:
                                     old_ex, existing_fact,
                                     f"contradicted_by_{fact.fact_id[:8]}"
                                 )
+                                # 🐛 v0.30: 旧事实的置信度改动必须落库！
+                                #   旧代码只写内存 + save_version，重启后还原
+                                try:
+                                    self.db.update_fact(existing_fact)
+                                except Exception:
+                                    pass
                     elif c.contradiction_type == "conflict":
                         # L2: 间接冲突 → 惩罚 0.15，降新事实
                         _total_penalty += self.conf_conflict_penalty
                     # L3 context: 上下文变化 → 不降置信度，仅标记
+                    # 🐛 v0.30: 每条矛盾单独保存（旧代码循环外才存 → 只存最后一条，L3 全丢）
+                    if self.db:
+                        try:
+                            self.db.save_contradiction(c)
+                        except Exception:
+                            pass
                 if _total_penalty > 0:
                     fact.confidence = max(base_conf - _total_penalty, 0.1)
-
+                    # 🐛 v0.30: 惩罚后的置信度必须落库！
+                    #   save_fact 在 line 170 已存原值 → DB 与内存不一致
                     if self.db:
-                        self.db.save_contradiction(c)
+                        try:
+                            self.db.update_fact(fact)
+                        except Exception:
+                            pass
 
                 return {"status": "contradiction_detected", "fact": fact, "contradictions": contradictions}
 
@@ -398,14 +414,18 @@ class FactNetwork:
         if fact.fact_type == "credential":
             return []
 
+        # 🐛 v0.30: "是"从 context 词中移除（与 brain._BROAD_PREDICATES 对齐）
+        #   "用户 是 希腊脚" vs "用户 是 事件视界" 是完全不同的信息，
+        #   旧代码生成 L3 幽灵矛盾 → 测试后"发现 N 条新矛盾"刷屏 + stale_warning
+        #   "截止日期是"仍能被"截止"关键词捕获，不受影响
         context_predicates = {
-            "是", "在", "去了", "住在", "位于", "来自",
+            "在", "去了", "住在", "位于", "来自",
             "开始", "结束", "截止", "推迟", "提前", "延长",
             "修改", "更新", "改成", "改为",
             "涨了", "跌了", "变成", "变为",
         }
-        # 也匹配包含上下文关键词的复合谓词（如"截止日期是"→含"是"）
-        context_keywords = {"是", "在", "截至", "截止", "位于", "开始", "结束"}
+        # 也匹配包含上下文关键词的复合谓词（如"截止日期是"→含"截止"）
+        context_keywords = {"在", "截至", "截止", "位于", "开始", "结束"}
         is_context = (
             fact.predicate in context_predicates
             or any(kw in fact.predicate for kw in context_keywords)
@@ -845,6 +865,13 @@ class FactNetwork:
             now = time.time()
             last = self._last_consolidation.get(agent_id, 0)
 
+            # 🐛 v0.30: 首次调用（进程刚启动）只做初始化，不触发整合！
+            #   旧代码 last=0 → now-0 > interval → 启动后第一条消息
+            #   立即触发全量后台 consolidate（浪费 + 可能批量衰减删除）
+            if last == 0:
+                self._last_consolidation[agent_id] = now
+                return None
+
             if now - last < self._auto_consolidate_interval:
                 return None  # 还没到时间
 
@@ -852,9 +879,12 @@ class FactNetwork:
                 logger.debug(f"Consolidation already in progress for '{agent_id}' — skipping")
                 return None
 
+            # 🐛 修复: 首次触发时 last=0，now-0=unix 时间戳（如 1785472688s），
+            #    日志误导排查。首次时 idle 记为 0。
+            _idle = now - last if last else 0.0
             logger.info(
                 f"🌙 Auto-consolidation triggered for '{agent_id}' "
-                f"(idle: {now - last:.0f}s, async)"
+                f"(idle: {_idle:.0f}s, async)"
             )
             self._consolidating.add(agent_id)
             self._last_consolidation[agent_id] = now
@@ -1348,6 +1378,14 @@ class FactNetwork:
                         self._cache_put(f)  # 预热缓存
 
             return facts
+
+    def _clear_agent_cache(self, agent_id: str):
+        """清除指定 agent 的内存缓存"""
+        with self._lock:
+            ids = [fid for fid, f in self._lru_cache.items() if f.agent_id == agent_id]
+            for fid in ids:
+                self._lru_cache.pop(fid, None)
+                self._cache_timestamps.pop(fid, None)
 
     def _get_cached_facts(self, agent_id: str) -> list[FactTriple]:
         """线程安全地获取缓存的 facts（供 RecallRouter 使用）。

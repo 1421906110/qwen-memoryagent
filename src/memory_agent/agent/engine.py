@@ -165,6 +165,122 @@ def _get_narration(tool_name: str, args: dict) -> Optional[str]:
     return tpl
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  消息压缩块（v0.31，对标 OpenWorker Auto-compaction）
+#  ── 机械状态块（零 LLM 零幻觉）+ 结构化摘要（4 段）──
+# ═══════════════════════════════════════════════════════════════════════
+_MECH_USER_CLIP = 200       # 机械块：单条用户消息截断字符
+_MECH_USER_MAX = 10         # 机械块：用户消息上限
+_MECH_TOOL_CLIP = 120       # 机械块：单条工具参数截断字符
+_MECH_TOOL_MAX = 10         # 机械块：工具操作上限
+_SUMMARY_MSG_MAX = 40       # 摘要源：最多取的消息条数（最新优先）
+_SUMMARY_MSG_CLIP = 150     # 摘要源：单条消息截断字符
+_SUMMARY_MAX_TOKENS = 200   # 摘要输出上限
+
+
+def _text_of(msg: dict) -> str:
+    """消息文本内容（兼容 str / content-parts 列表）"""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return "" if content is None else str(content)
+
+
+def _extract_user_lines(messages: list[dict]) -> list[str]:
+    """被裁段里的用户消息原文——意图的 ground truth，不依赖 LLM 记得"""
+    out = []
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        text = " ".join(_text_of(m).split())
+        if not text:
+            continue
+        out.append(text[:_MECH_USER_CLIP - 1] + "…" if len(text) > _MECH_USER_CLIP else text)
+        if len(out) >= _MECH_USER_MAX:
+            break
+    return out
+
+
+def _extract_tool_ops(messages: list[dict]) -> list[str]:
+    """被裁段里的工具操作记录（名字 + 关键参数，参数截断防膨胀）"""
+    out = []
+    for m in messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = str(fn.get("name") or "")
+            args = fn.get("arguments") or "{}"
+            try:
+                parsed = json.loads(args)
+            except (ValueError, TypeError):
+                parsed = {}
+            if not isinstance(parsed, dict):  # 标量 JSON（如 '"x"'）防御
+                parsed = {}
+            key = (parsed.get("path") or parsed.get("file_path")
+                   or parsed.get("command") or parsed.get("url") or "")
+            line = name + (f" {str(key)[:_MECH_TOOL_CLIP]}" if key else "")
+            out.append(line)
+            if len(out) >= _MECH_TOOL_MAX:
+                break
+    return out
+
+
+def _extract_mechanical_block(messages: list[dict]) -> str:
+    """机械状态块：用户原话清单 + 工具操作记录（纯代码提取，零 LLM 零幻觉）"""
+    lines = []
+    users = _extract_user_lines(messages)
+    if users:
+        lines.append("【被压缩段的用户原话】")
+        lines += [f"- {u}" for u in users]
+    ops = _extract_tool_ops(messages)
+    if ops:
+        lines.append("【被压缩段的工具操作】")
+        lines += [f"- {o}" for o in ops]
+    return "\n".join(lines)
+
+
+_SUMMARY_SYSTEM = (
+    "你是对话压缩器。把下面的旧对话压缩成结构化摘要，它是模型对该段对话的唯一记忆。\n"
+    "只输出以下 4 段，每段一个 markdown 标题：\n"
+    "1. 主要请求与约束 — 用户想完成什么，包括任何时候提出的约束"
+    "（如「未经批准不要发」），约束比当时更重要\n"
+    "2. 关键决策 — 已确定的结论和理由（含 WHY）\n"
+    "3. 文件与命令 — 涉及的文件路径和执行的命令（只需路径和用途，"
+    "内容让模型需要时重读）\n"
+    "4. 待办与下一步 — 未完成事项和紧接着的下一步动作\n"
+    "不要复制文件内容，不要复述工具返回的大段结果，不要输出其他内容。"
+)
+
+
+def _summarize_dropped(llm, messages: list[dict]) -> str:
+    """LLM 结构化摘要（4 段），失败返回空串（调用方降级为纯机械块）"""
+    span = []
+    for m in reversed(messages):  # 最新优先收集，保证最新的一定在内
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        text = " ".join(_text_of(m).split())
+        if not text:
+            continue
+        span.append(f"[{m.get('role')}] {text[:_SUMMARY_MSG_CLIP]}")
+        if len(span) >= _SUMMARY_MSG_MAX:
+            break
+    span.reverse()  # 还原时间顺序
+    if not span:
+        return ""
+    try:
+        summary = llm.chat(
+            messages=[{"role": "system", "content": _SUMMARY_SYSTEM},
+                      {"role": "user", "content": "\n".join(span)}],
+            system_prompt=None, temperature=0.3, max_tokens=_SUMMARY_MAX_TOKENS,
+        )
+    except Exception:  # 任何失败 → 空串，调用方降级为纯机械块
+        return ""
+    return (summary or "").strip()
+
+
 # █████████████████████████████████████████████████████████████████████
 #  TurnEngine — 事件驱动 Agent 主循环
 # █████████████████████████████████████████████████████████████████████
@@ -545,7 +661,14 @@ class TurnEngine:
     def _prune_messages(self, messages: list[dict],
                          max_tokens: int = 24000,
                          keep_recent: int = 8) -> list[dict]:
-        """消息裁剪：超预算时丢弃旧工具记录，保留最近 + system + 首条 user。
+        """消息裁剪：超预算时压缩旧消息，保留最近 + system + 首条 user。
+
+        🔥 v0.31 优化（对标 OpenWorker Auto-compaction）：
+          1. 机械状态块（零 LLM 零幻觉）：被裁段里的用户消息原文 + 工具操作记录，
+             确定性状态不依赖摘要模型
+          2. 结构化摘要（4 段）：主要请求与约束 / 关键决策 / 文件与命令 / 待办与下一步
+          3. 续跑契约：压缩块末尾明确"继续当前工作"，防止模型复述/重问
+          4. 三层降级链：LLM 摘要失败 → 只用机械块 → 机械块为空 → 纯裁剪
 
         DeepSeek 要求 tool 消息必须跟在对应 tool_calls 消息后，
         裁剪时确保 tool_calls 配对不被破坏。
@@ -597,17 +720,27 @@ class TurnEngine:
         dropped = len(messages) - len(keep)
         if dropped:
             logger.info("✂️ TurnEngine 裁剪: %d→%d (丢%d条)", len(messages), len(keep), dropped)
-            # 简单摘要被裁剪的消息（替代直接丢弃）
-            _dropped_msgs = [m for m in non_system if m not in keep and m.get("role") in ("user", "assistant")]
-            if _dropped_msgs and self.llm:
-                _ctx = " ".join(m.get("content","")[:100] for m in _dropped_msgs[:5])
-                _summary = self.llm.chat(
-                    messages=[{"role": "system", "content": f"用一句话概括这段对话的核心：{_ctx}"}],
-                    system_prompt=None, temperature=0.3, max_tokens=100,
-                )
-                if _summary:
-                    keep.insert(1, {"role": "user", "content": f"[对话摘要] {_summary.strip()}"})
-                    logger.info("📝 裁剪摘要: %s", _summary.strip()[:80])
+            # ── 机械状态块：零 LLM 零幻觉，永远尝试提取 ──
+            _dropped_msgs = [m for m in non_system if m not in keep]
+            _mech_block = _extract_mechanical_block(_dropped_msgs)
+            _block_parts = []
+            if _mech_block:
+                _block_parts.append(_mech_block)
+            # ── 结构化摘要（LLM，失败自动降级为纯机械块）──
+            if self.llm:
+                try:
+                    _summary = _summarize_dropped(self.llm, _dropped_msgs)
+                    if _summary:
+                        _block_parts.insert(0, _summary)
+                except Exception as e:
+                    logger.warning("⚠️ 裁剪摘要失败，仅用机械块: %s", str(e)[:100])
+            if _block_parts:
+                _block_parts.append("继续当前工作，不要复述或重复提问已答内容。")
+                keep.insert(1, {"role": "user", "content": "\n\n".join(_block_parts)})
+                logger.info("📦 压缩块: 摘要%s + 机械块%s (%d条源消息)",
+                            "✅" if len(_block_parts) > 2 else "❌",
+                            "✅" if _mech_block else "❌",
+                            len(_dropped_msgs))
         return keep
 
     def _parallel_safe(self, tool_name: str) -> bool:

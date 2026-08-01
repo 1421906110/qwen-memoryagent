@@ -381,8 +381,11 @@ class CogniMem:
                     if _matched:
                         candidates.append(old)
                         continue
-                    # 日期模式匹配：predicate含"月"和"日" → 日期相关的事实
-                    if "月" in old.predicate and "日" in old.predicate:
+                    # 日期模式匹配：仅当新事实和旧事实都是日期类谓词时才纳入
+                    # 🐛 v0.30: 旧代码只看 old.predicate 含"月""日" →
+                    #   修正"生日是6月10日"会误伤"纪念日是5月20日"等其他日期事实
+                    if any(dw in f.predicate for dw in ("生日", "日期")) and \
+                       any(dw in old.predicate for dw in ("生日", "日期")):
                         candidates.append(old)
                         continue
                     # 被修正标记的事实也加入
@@ -437,14 +440,21 @@ class CogniMem:
                         old.subject, old.predicate, old.object,
                     )
 
-        # 🐛 v0.27 修复: 隐式修正检测 — 同(subject, predicate)不同object
-        # 用户说"我叫测试用户"应覆盖"我叫张三"，不需要显式"实际是"关键词
+        # 🐛 v0.28 修复: 隐式修正检测 — 只对fact类型生效
+        # 用户说"我叫测试用户"应覆盖"我叫张三"（唯一属性修正）
+        # ⚠️ preference/goal 是累加型（喜欢吃日式料理 + 吃苦瓜 是两件事不互斥）
+        #    不能因为"喜欢吃苦瓜"就把"喜欢吃日式料理"打为"被修正"
+        # 🐛 v0.29 修复: 超级通用谓语"是"不触发隐式修正（Q1 希腊脚误杀）
+        #   "用户 是 希腊脚"和"用户 是 事件视界"是完全不同的信息，不是相互修正
+        _BROAD_PREDICATES = frozenset({"是"})
         if source_type not in ("user_correction",):
             for f in facts:
-                if f.fact_type not in ("fact", "preference", "goal"):
+                if f.fact_type != "fact":
                     continue
                 if not f.subject or not f.predicate:
                     continue
+                if f.predicate in _BROAD_PREDICATES:
+                    continue  # "是"太通用，不触发隐式修正
                 old_facts = self.fact_network.recall_by_triple(f.subject, f.predicate, agent_id)
                 for old in old_facts:
                     if old.fact_id == f.fact_id or old.fact_id in [x.fact_id for x in facts]:
@@ -470,6 +480,70 @@ class CogniMem:
                         f.subject, f.predicate, f.object,
                         old.subject, old.predicate, old.object,
                     )
+
+        # 🐛 v0.28: 反义谓词检测 — "不喜欢X了" → 降低"喜欢X"旧事实置信度
+        # preference 类更新（"不喜欢美式了→现在喜欢拿铁"）需要降权旧"喜欢美式"
+        for f in facts:
+            if f.fact_type != "preference" or not f.subject or not f.predicate:
+                continue
+            if f.predicate == "不喜欢" and f.object:
+                old_likes = self.fact_network.recall_by_triple(f.subject, "喜欢", agent_id)
+                for old in old_likes:
+                    if old.fact_id == f.fact_id:
+                        continue
+                    # 检查是否同话题（对象有重叠词）
+                    _new_obj = f.object.replace("了", "").strip()
+                    _overlap = any(w in old.object and len(w) >= 2 for w in [_new_obj])
+                    if not _overlap and _new_obj not in old.object and old.object not in _new_obj:
+                        continue
+                    if old.confidence >= 0.5:
+                        logger.info("🔄 反义降权: (%s, %s, %s) 旧(%s, %s, %s) conf=%.2f→%.2f",
+                                    f.subject, f.predicate, f.object,
+                                    old.subject, old.predicate, old.object,
+                                    old.confidence, old.confidence * 0.5)
+                    old.confidence *= 0.5
+                    if "被修正" not in old.context_tags:
+                        old.context_tags = list(old.context_tags) + ["被修正"]
+                    self.fact_network._cache_put(old)
+                    if self.fact_network.db:
+                        try:
+                            self.fact_network.db.update_fact(old)
+                        except Exception:
+                            pass
+
+        # 🐛 v0.29 修复(Q6): 属性自动更新 — "搬到X" → 更新"住在X"
+        # 当用户说"搬到通州了"，旧"住在朝阳区"应被自动降权
+        _RELOCATION_VERBS = frozenset({"搬到", "搬去", "搬到了", "搬去了", "搬来", "搬来了", "搬到"})
+        for f in facts:
+            if f.fact_type != "fact" or not f.subject or not f.object:
+                continue
+            if f.predicate not in _RELOCATION_VERBS:
+                continue
+            # 找到同 subject 的"住在"事实
+            old_residence = self.fact_network.recall_by_triple(f.subject, "住在", agent_id)
+            for old in old_residence:
+                if old.fact_id == f.fact_id:
+                    continue
+                if old.object == f.object:
+                    continue  # 搬到同一个地方，不处理
+                if old.confidence >= 0.4:
+                    logger.info("🔄 搬迁移权: (%s, %s, %s) 旧(%s, %s, %s) conf=%.2f→%.2f",
+                                f.subject, f.predicate, f.object,
+                                old.subject, old.predicate, old.object,
+                                old.confidence, old.confidence * 0.3)
+                old.confidence *= 0.3
+                if "被修正" not in old.context_tags:
+                    old.context_tags = list(old.context_tags) + ["被修正"]
+                # 在新事实上加"修正"标签，提高其权重
+                if "修正" not in f.context_tags:
+                    f.context_tags = list(f.context_tags) + ["修正"]
+                f.confidence = max(f.confidence, 0.75)
+                self.fact_network._cache_put(old)
+                if self.fact_network.db:
+                    try:
+                        self.fact_network.db.update_fact(old)
+                    except Exception:
+                        pass
 
         # 3. 批量添加 (含矛盾检测 + 来源权重)
         results = self.fact_network.batch_add(facts, agent_id, source_type)
@@ -791,6 +865,78 @@ class CogniMem:
 
     # ── 维护 ──
 
+    def forget(self, query: str, agent_id: str = "default") -> dict:
+        """🐛 v0.29 修复(Q5): 根据关键词遗忘特定记忆"""
+        db = getattr(self.fact_network, 'db', None)
+        if not db:
+            return {"forgotten": 0, "message": "无数据库连接"}
+        try:
+            # 从 query 提取关键词（去掉"忘记/删掉"等指令词）
+            # 🐛 v0.30: "我的"必须整体匹配（旧正则先匹配"我"→ 剩"的银行卡信息"，
+            #   开头的"的"导致后续匹配全部失败）
+            _clean = re.sub(r'(?:请|帮我)?(?:忘记|忘掉|删掉|删除|清除|不要记|别记)(?:我刚才说的|我的|我|的|这个|那个|这条)?', '', query).strip()
+            if not _clean or len(_clean) < 2:
+                return {"forgotten": 0, "message": "请指定要遗忘什么信息", "hint": '例如"忘记我说的银行卡信息"'}
+
+            # 提取关键词（去掉"是敏感数据"等后缀）
+            _clean = re.sub(r'[，,。.！!？?](?:那|这|它).*$', '', _clean)
+            # 去末尾标点
+            _clean = _clean.strip('，。！？,.!?、；;')
+            # 🐛 v0.30: 剥离宽泛后缀（"银行卡信息"→"银行卡"）
+            #   用户说"银行卡信息"，存的事实是"银行卡后四位" — 必须用核心词匹配
+            _core = re.sub(r'(?:信息|号码|密码|账号|账户|资料|情况|内容|数据|细节)$', '', _clean)
+            if len(_core) >= 2:
+                _clean = _core
+            _words = [w for w in re.split(r'[的，,\s]', _clean) if len(w) >= 2]
+
+            all_facts = self.fact_network._get_agent_facts(agent_id)
+            ids_to_forget = set()
+            for f in all_facts:
+                _text = f"{f.subject} {f.predicate} {f.object} {f.evidence[0].statement if f.evidence else ''}"
+                # ① 精确匹配完整关键词
+                if _clean in _text:
+                    ids_to_forget.add(f.fact_id)
+                # ② 分词单词匹配（银行卡/信用卡/密码等）
+                if any(w in _text for w in _words):
+                    ids_to_forget.add(f.fact_id)
+
+            if not ids_to_forget:
+                return {"forgotten": 0, "message": f"未找到与「{_clean}」相关的记忆"}
+
+            # 🐛 v0.29: UPDATE 和 DELETE 必须分开事务。
+            # DELETE 语句失败会导致整个事务回滚，之前的 UPDATE 全部丢失！
+            with db._plain_cursor_ctx() as cur:
+                for fid in ids_to_forget:
+                    cur.execute(
+                        "UPDATE facts SET confidence = 0, importance = 0, "
+                        "context_tags = array_append(context_tags, '已遗忘') "
+                        "WHERE fact_id = %s AND agent_id = %s",
+                        (fid, agent_id))
+            # 单独事务删矛盾记录（表不存在也要保证 UPDATE 已提交）
+            # 🐛 v0.30: 列名错误！contradictions 表只有 fact_a_id/fact_b_id，
+            #   旧代码写 related_fact_id → 每次报"column does not exist"被吞掉
+            #   → 遗忘后矛盾记录永久残留，ask() 持续追问旧矛盾
+            try:
+                with db._plain_cursor_ctx() as cur2:
+                    id_list = list(ids_to_forget)
+                    # 🐛 v0.30: uuid 列必须 ::text 再比较（ANY(ARRAY['uuid']) 会报
+                    #   "operator does not exist: uuid = text"）
+                    cur2.execute(
+                        "DELETE FROM contradictions WHERE fact_a_id::text = ANY(%s) OR fact_b_id::text = ANY(%s)",
+                        (id_list, id_list))
+            except Exception as _e2:
+                logger.warning("⚠️ 矛盾记录清理失败: %s", _e2)
+
+            # 清除缓存 + 快照
+            self.fact_network._clear_agent_cache(agent_id)
+            self._snapshot.pop(agent_id, None)
+
+            logger.info("🗑️ Forget agent '%s': %d facts for '%s'", agent_id, len(ids_to_forget), _clean)
+            return {"forgotten": len(ids_to_forget), "message": f"已遗忘 {len(ids_to_forget)} 条相关记忆"}
+        except Exception as e:
+            logger.error("Forget failed: %s", e)
+            return {"forgotten": 0, "message": str(e)}
+
     def reset_agent(self, agent_id: str = "default") -> dict:
         """清除指定 Agent 的所有记忆（含 FK 关联表）"""
         db = getattr(self.fact_network, 'db', None)
@@ -808,7 +954,11 @@ class CogniMem:
             if hasattr(db, 'log_audit'):
                 db.log_audit(agent_id, "delete", f"清除 Agent 所有记忆（{total} 行）",
                              caller="brain.reset_agent")
-            logger.info("🗑️ Reset agent '%s': %d rows deleted", agent_id, total)
+            # 🐛 v0.28: 清内存缓存（否则矛盾检测引用已删 fact_id 导致外键冲突）
+            self.fact_network._clear_agent_cache(agent_id)
+            # 🐛 v0.29 修复: /clear 后必须清除内存快照，否则旧数据污染新会话（Q10/Q17）
+            self._snapshot.pop(agent_id, None)
+            logger.info("🗑️ Reset agent '%s': %d rows deleted, snapshot cleared", agent_id, total)
             return {"deleted": total, "message": "记忆已清除"}
         except Exception as e:
             logger.error("Reset agent failed: %s", e)

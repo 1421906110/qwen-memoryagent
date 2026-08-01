@@ -3,8 +3,9 @@ Agent Engine — Shared base for CogniMem agent paths.
 
 v0.23 — Stripped to essentials after Agent.chat() retirement.
   - _BASE_SYSTEM_PROMPT: shared between simple path and TurnEngine
-  - _prune_messages: context window management
   - AgentContext: dataclass used by tools.py/modules.py for type hints
+
+v0.31 — 移除死代码：模块级 _prune_messages 无人引用（实际生效的是 engine.py TurnEngine 方法版）
 
 Full agent loop is in engine.py (TurnEngine).
 Goal tracking was in goal.py (deleted).
@@ -47,7 +48,7 @@ _BASE_SYSTEM_PROMPT = (
     "- **一次做对** — 动手前想清楚边界和约束，做完了验证，说「好了」就是真的好了\n"
     "- **找根因** — 修问题本身，不是贴创可贴\n"
     "- **错了认** — 有错直接承认纠正，不找借口不绕弯\n"
-    "- **诚实批判** — 不好就说不好，不确定就说不知道，不编不造\n"
+    "- **诚实优先** — 不编造、不猜测。**先查 <memory-context> 再回答**，不要直接说「没有记录」而忽略上方记忆列表\n"
     "- **回复简洁** — 打招呼回「你好」或「嗨」，不分析不推理不交代背景\n"
     "- **主动建议** — 任务完成时提供 1-2 个具体可操作的延续方向\n\n"
     "## 🧠 分析\n"
@@ -58,7 +59,7 @@ _BASE_SYSTEM_PROMPT = (
     "- 用户假设有误时客观指出并提供更好的方案\n"
     "- 直接说核心发现，不要表格/评分/emoji 模板\n\n"
     "## 🧠 记忆\n"
-    "- 你从系统 prompt 的 <memory-context> 中能看到已有的记忆信息\n"
+    "- ⚠️ <memory-context> 是用户告诉过你的全部事实。**用户问「我参加过什么」「我的XX是什么」时，必须先在这里找答案**，找不到才诚实说不知道\n"
     "- **当用户告诉你重要的个人信息时**（工作/项目/偏好/决策/联系方式等），主动调 `memory_remember` 工具存下来\n"
     "- 已存在的信息不用重复存，有冲突的以最新为准\n\n"
     "## 💬 回复\n"
@@ -126,75 +127,6 @@ _BASE_SYSTEM_PROMPT = (
     "- 代码输出：给出完整代码片段 + 文件路径 + 使用说明\n"
     "- 比较分析：用 Markdown 表格呈现对比维度和结论\n"
 )
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  消息上下文预算（防止工具迭代膨胀爆上下文窗口）
-# ═══════════════════════════════════════════════════════════════════════════
-_MAX_CONTEXT_TOKENS = 24000
-_PRUNE_KEEP_RECENT = 8
-
-
-def _estimate_tokens(text: str) -> int:
-    """粗略估算 token 数（中英文混合）"""
-    en_chars = sum(1 for c in text if ord(c) < 128)
-    cn_chars = len(text) - en_chars
-    return int(en_chars / 4 + cn_chars / 1.5)
-
-
-def _prune_messages(messages: list[dict]) -> list[dict]:
-    """裁剪旧工具调用记录以控制上下文窗口。
-
-    策略：
-    1. 保留 system prompt（第一条）
-    2. 保留第一条 user 消息（原始请求）
-    3. 保留最后 _PRUNE_KEEP_RECENT 条消息（最新上下文）
-    4. DeepSeek 要求 tool 消息必须跟在对应的 tool_calls 消息后
-
-    Returns: 裁剪后的消息列表
-    """
-    if len(messages) <= 2:
-        return messages
-
-    total = sum(_estimate_tokens(str(m.get("content", ""))) for m in messages)
-    if total < _MAX_CONTEXT_TOKENS:
-        return messages
-
-    system_msgs = [m for m in messages if m.get("role") == "system"]
-    non_system = [m for m in messages if m.get("role") != "system"]
-
-    if len(non_system) <= _PRUNE_KEEP_RECENT:
-        return messages
-
-    first_user = None
-    for m in non_system:
-        if m.get("role") == "user" and not m.get("content", "").startswith("【必须调用"):
-            first_user = m
-            break
-
-    keep = list(system_msgs)
-    if first_user is not None:
-        keep.append(first_user)
-    recent = non_system[-_PRUNE_KEEP_RECENT:]
-    for m in recent:
-        if m not in keep:
-            keep.append(m)
-
-    # 补全 tool_calls 配对（DeepSeek 要求）
-    _tool_ids = {m["tool_call_id"] for m in keep
-                 if m.get("role") == "tool" and m.get("tool_call_id")}
-    if _tool_ids:
-        for m in non_system:
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                for tc in m["tool_calls"]:
-                    if tc.get("id") in _tool_ids and m not in keep:
-                        keep.append(m)
-                        break
-
-    dropped = len(messages) - len(keep)
-    if dropped:
-        logger.info("✂️ 消息裁剪: %d→%d (丢弃 %d 条旧工具记录)", len(messages), len(keep), dropped)
-    return keep
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Types

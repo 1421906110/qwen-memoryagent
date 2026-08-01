@@ -6,7 +6,7 @@
 
 import logging
 from typing import Any
-from .models import FactTriple
+from .models import FactTriple, EvidenceItem
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +266,9 @@ class RecallRouter:
         if semantic_hit is not None and intent == 'factual':
             self._stats["l0_hits"] += 1
             logger.debug(f"Semantic cache hit for '{query}' ({len(semantic_hit)} facts)")
+            # 🐛 v0.30: 语义缓存直接返回路径也要过滤已遗忘事实（不走 _rank_and_trim）
+            semantic_hit = [f for f in semantic_hit
+                            if f.confidence > 0.01 and "已遗忘" not in f.context_tags]
             return semantic_hit
 
         # ── L0: Cache Check (0 token, <1ms) ──
@@ -548,6 +551,15 @@ class RecallRouter:
         q = query.lower().strip() if query else ""
         stm_ids = stm_ids or set()
 
+        # 🐛 v0.30: 统一过滤已遗忘/零置信度事实！
+        #   forget() 后事实 conf=0 + "已遗忘"标签，但 navigation recall（快照重建）
+        #   取全部事实 → conf=0 的"银行卡2210"进快照 → LLM 仍然回答遗忘内容。
+        #   所有召回路径（navigation/factual/状态机）都经过这里。
+        _alive = [f for f in facts
+                  if f.confidence > 0.01 and "已遗忘" not in f.context_tags]
+        if len(_alive) != len(facts):
+            facts = _alive
+
         # ── 1. 半衰期配置（与 fact_network._apply_decay 保持一致）──
         _HALF_LIFE_MAP = {
             "abstraction": 60.0,
@@ -723,7 +735,8 @@ class RecallRouter:
         # 🆕 v0.25 叙事 connected_facts 展开
         # 如果召回结果中有叙事事实，把它的 connected_facts 也展开加入
         narrative_expanded = set(f.fact_id for f in facts)
-        _narrative_facts = [f for f in facts if f.fact_type == "narrative"]
+        _narrative_facts = [f for f in facts if f.fact_id in narrative_expanded and f.fact_type == "narrative"]
+        _appended = False
         for nf in _narrative_facts:
             for cid in nf.connected_facts:
                 if cid not in narrative_expanded:
@@ -731,6 +744,12 @@ class RecallRouter:
                     if cf:
                         facts.append(cf)
                         narrative_expanded.add(cid)
+                        _appended = True
+        # 🐛 v0.30: 展开后必须重新排序！
+        #   旧代码 append 在已排序列表末尾 → 超出 top_k 被 facts[:top_k] 裁掉，
+        #   展开机制实际无效
+        if _appended:
+            facts.sort(key=score, reverse=True)
 
         # 🆕 v0.25 数字状态机追踪：检查是否有同主题的收支记录并累加
         _state_items = [f for f in facts if f.predicate in ('有', '花了', '奖励了', '买了', '赚了', '获得了')]
@@ -746,6 +765,91 @@ class RecallRouter:
                 # 添加一行汇总到 system prompt 风格的提示
                 _parts = [f'{n[2]}' for n in _numeric_facts]
                 logger.info(f'📊 状态机检测: {len(_numeric_facts)}条数值事实: {" | ".join(_parts)}')
+
+        # 🐛 v0.29 修复(Q9): 音量/温度等增量状态机 — "调高/调低/设置为"
+        # 从 30% → 调高到60% → 调低15个百分点 = 45%
+        # ⚠️ 用全量 agent 事实（不只当前召回），避免"调低"那条没被召回导致漏算
+        try:
+            # 🐛 v0.30: 状态机块曾引用未定义的 agent_id（_rank_and_trim 签名无此参数）
+            #   → NameError 被静默吞掉 → 状态机从 v0.29 起从未在真实链路生效！
+            #   从 facts[0].agent_id 推断
+            if self.fn and self.fn.db:
+                _agent = facts[0].agent_id if facts else ""
+                _all_facts = self.fn._get_agent_facts(_agent) if _agent else facts
+                if not _all_facts:
+                    _all_facts = facts
+            else:
+                _all_facts = facts
+            _ADJUST_PREDS = ('调高', '调低', '调高到', '调低到')
+            _adj_facts = [f for f in _all_facts if f.predicate in _ADJUST_PREDS]
+            if _adj_facts:
+                import re as _re2
+                _num_ops = []
+                _seen_ops = set()  # 🐛 v0.30: 去重改用 set（原 O(n²) 列表扫描）
+                for f in _adj_facts:
+                    _nums = _re2.findall(r'(\d+(?:\.\d+)?)', f.object)
+                    if _nums:
+                        # 去重：同 predicate+object 只算一次
+                        _dup_key = (f.predicate, f.object)
+                        if _dup_key not in _seen_ops:
+                            _seen_ops.add(_dup_key)
+                            _num_ops.append((f, float(_nums[-1]), f.predicate))
+                _topic_word = None
+                for f in _adj_facts:
+                    _m = _re2.search(r'音量|温度|亮度|进度', f.object)
+                    if _m:
+                        _topic_word = _m.group(0)
+                        break
+                _base_val = None
+                if _topic_word:
+                    for f in _all_facts:
+                        if f.predicate in ('设置为', '是', '调到', '设置') and _topic_word in f.object:
+                            _nums = _re2.findall(r'(\d+(?:\.\d+)?)', f.object)
+                            if _nums:
+                                _base_val = float(_nums[0])
+                                break
+                # 🐛 v0.30: 增量操作必须按时间顺序计算！
+                #   DB 查询按 confidence DESC 排序，多操作时顺序会乱
+                #   （30 → 调高到60 → 调低15 = 45；乱序会算成 60）
+                _num_ops.sort(key=lambda o: o[0].created_at or "")
+                if _num_ops:
+                    _total = _base_val if _base_val is not None else _num_ops[0][1]
+                    _log_parts = []
+                    if _base_val is not None:
+                        _log_parts.append(f'初始{_total:.0f}')
+                    for f, num, pred in _num_ops:
+                        # 🐛 v0.30: "调高到/调低到"是绝对设置（调到X），不是增量！
+                        #   旧代码把"调高到60%"当 +60 增量 → 30+60+60-15=135（应为45）
+                        if pred in ('调高到', '调低到'):
+                            _total = num
+                            _log_parts.append(f'设置到{num:.0f}')
+                        elif '调低' in pred:
+                            _total -= num
+                            _log_parts.append(f'调低{num:.0f}')
+                        else:
+                            _total += num
+                            _log_parts.append(f'调高{num:.0f}')
+                    _state_txt = f'当前{_topic_word or "数值"}: {_total:.0f}（由 {" → ".join(_log_parts)} 计算得出）'
+                    logger.info(f'📊 增量状态机: {_state_txt}')
+                    # 🐛 v0.30: 函数内局部 import 会把签名注解的 FactTriple 变成局部变量，
+                    #   Python 3.11 急切求值 → UnboundLocalError（本地 3.14 惰性注解侥幸通过）
+                    #   已用模块级 import（recall.py:9）
+                    facts.append(FactTriple(
+                        subject="用户",
+                        predicate=f"当前{_topic_word or '数值'}",
+                        object=f"{_total:.0f}",
+                        agent_id=facts[0].agent_id if facts else "default",
+                        fact_type="fact",
+                        confidence=0.75,
+                        evidence=[EvidenceItem(
+                            source="state_machine",
+                            statement=_state_txt[:300],
+                        )],
+                        context_tags=[_topic_word or "状态", "计算"],
+                    ))
+        except Exception as _e:
+            # 🐛 v0.30: 升级为 warning — 静默吞错会让功能悄悄失效
+            logger.warning("⚠️ 增量状态机失败: %s", _e)
 
         trimmed = facts[:top_k]
 

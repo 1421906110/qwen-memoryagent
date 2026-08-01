@@ -116,6 +116,9 @@ class DatabaseAdapter:
     def _conn_ctx(self):
         """安全连接上下文 — 自动健康检查 + 异常时归还连接"""
         conn = self._get_healthy_conn()
+        # 🐛 v0.30: 坏连接 discard 后 finally 不能再 putconn
+        #   （psycopg2 pool 对不在 _used 的连接抛 PoolError，覆盖原始异常）
+        _discarded = False
         try:
             yield conn
             conn.commit()
@@ -125,6 +128,7 @@ class DatabaseAdapter:
             try:
                 if hasattr(self._pool, '_used'):
                     self._pool._used.discard(conn)
+                    _discarded = True
             except Exception:
                 pass
             raise
@@ -132,12 +136,14 @@ class DatabaseAdapter:
             conn.rollback()
             raise
         finally:
-            self._put_conn(conn)
+            if not _discarded:
+                self._put_conn(conn)
 
     @contextmanager
     def _cursor_ctx(self):
         """游标上下文 — 自动健康检查 + 坏连接自动修复"""
         conn = self._get_healthy_conn()
+        _discarded = False
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 yield cur
@@ -148,6 +154,7 @@ class DatabaseAdapter:
             try:
                 if hasattr(self._pool, '_used'):
                     self._pool._used.discard(conn)
+                    _discarded = True
             except Exception:
                 pass
             raise
@@ -155,12 +162,14 @@ class DatabaseAdapter:
             conn.rollback()
             raise
         finally:
-            self._put_conn(conn)
+            if not _discarded:
+                self._put_conn(conn)
 
     @contextmanager
     def _plain_cursor_ctx(self):
         """无 DictCursor 的游标上下文 — 自动健康检查"""
         conn = self._get_healthy_conn()
+        _discarded = False
         try:
             with conn.cursor() as cur:
                 yield cur
@@ -171,6 +180,7 @@ class DatabaseAdapter:
             try:
                 if hasattr(self._pool, '_used'):
                     self._pool._used.discard(conn)
+                    _discarded = True
             except Exception:
                 pass
             raise
@@ -178,7 +188,8 @@ class DatabaseAdapter:
             conn.rollback()
             raise
         finally:
-            self._put_conn(conn)
+            if not _discarded:
+                self._put_conn(conn)
 
     # ═══════════════════════════════════════════
     # DDL
@@ -265,7 +276,7 @@ class DatabaseAdapter:
             elif isinstance(ev, dict):
                 evidence_json.append(ev)
 
-        def _parse_ts(ts: str) -> datetime | None:
+        def _parse_ts(ts: str, *, allow_null: bool = False) -> datetime | None:
             if not ts:
                 return None
             if isinstance(ts, datetime):
@@ -273,7 +284,10 @@ class DatabaseAdapter:
             try:
                 return datetime.fromisoformat(ts)
             except (ValueError, TypeError):
-                return datetime.now(timezone.utc)
+                # 🐛 v0.30: 坏时间戳不再无条件回退 now()（会篡改事实年龄）。
+                #   created_at/accessed_at 是 NOT NULL 列 → 只能回退 now()；
+                #   可空列（expires_at）返回 None
+                return None if allow_null else datetime.now(timezone.utc)
 
         return {
             "fact_id": fact.fact_id,
@@ -294,7 +308,7 @@ class DatabaseAdapter:
             "accessed_at": _parse_ts(fact.accessed_at),
             "last_confirmed": _parse_ts(fact.last_confirmed),
             "access_count": fact.access_count,
-            "expires_at": _parse_ts(fact.expires_at) if fact.expires_at else None,
+            "expires_at": _parse_ts(fact.expires_at, allow_null=True) if fact.expires_at else None,
         }
 
     # ═══════════════════════════════════════════
@@ -369,11 +383,14 @@ class DatabaseAdapter:
                     access_count = EXCLUDED.access_count,
                     last_confirmed = EXCLUDED.last_confirmed
             """, row)
-            try:
-                txt = f"{fact.subject} {fact.predicate} {fact.object}"
-                self.update_embedding(fact.fact_id, txt)
-            except Exception:
-                pass
+        # 🐛 v0.30: embedding 必须在 INSERT commit 之后更新！
+        #   旧代码在事务内调 update_embedding（自己开连接）→ READ COMMITTED
+        #   看不到未提交的 INSERT → UPDATE 永远 0 行 → L3 向量搜索永远召不到新事实
+        try:
+            txt = f"{fact.subject} {fact.predicate} {fact.object}"
+            self.update_embedding(fact.fact_id, txt)
+        except Exception:
+            pass
 
     def update_fact(self, fact: FactTriple):
         """更新已有事实（合并后）"""
@@ -574,8 +591,9 @@ class DatabaseAdapter:
             conditions.append("operation = %s")
             params.append(operation)
         if since_hours > 0:
-            conditions.append("created_at >= now() - interval '%s hours'")
-            params.append(str(since_hours))
+            # 🐛 v0.30: 旧写法 interval '%s hours' → 参数渲染成 ''5' hours' → 语法错误，
+            #   since_hours>0 的审计查询永远返回空。整值参数直接拼入（已校验 int）。
+            conditions.append(f"created_at >= now() - interval '{int(since_hours)} hours'")
 
         where = " AND ".join(conditions) if conditions else "TRUE"
         sql = f"""
