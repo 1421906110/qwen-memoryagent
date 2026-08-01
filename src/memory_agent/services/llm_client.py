@@ -83,6 +83,24 @@ def estimate_tokens(text: str) -> int:
     return int(len(text) / CHARS_PER_TOKEN)
 
 
+def select_memories_for_context(memories: list[dict], max_tokens: int) -> list[dict]:
+    """按 token 预算挑选记忆进上下文：可信度高的优先，超预算即停。
+
+    🐛 v0.32 修复: 此前被调用但从未定义 → answer_with_memories 必崩 NameError。
+    """
+    if not memories:
+        return []
+    ordered = sorted(memories, key=lambda m: m.get("confidence", 0.0), reverse=True)
+    selected: list[dict] = []
+    budget = 0
+    for m in ordered:
+        budget += estimate_tokens(m.get("content", ""))
+        if budget > max_tokens and selected:
+            break
+        selected.append(m)
+    return selected
+
+
 # ⭐ API 调用自动重试（指数退避），应对网络抖动/限流
 def _api_call_with_retry(call_fn, max_retries: int = 3, base_delay: float = 1.0,
                          is_429: bool = False):

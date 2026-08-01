@@ -44,7 +44,7 @@ from memory_agent.services.memory_service import MemoryService
 from memory_agent.storage import SQLiteStore
 from memory_agent.agent import ToolRegistry, _BASE_SYSTEM_PROMPT, AgentContext
 from memory_agent.agent.catalog import CATALOG, Capability, expand, register_capability
-from memory_agent.agent.engine import TurnEngine, Mode, ToolCache  # 🔥 v0.23
+from memory_agent.agent.engine import TurnEngine, Mode, ToolCache, TurnResult  # 🔥 v0.23
 from memory_agent.agent.risk import RiskClass  # 🔥 v0.23: 简单路径只读工具筛选
 from memory_agent.agent.tools import register_all_tools
 from cognimem.core.brain import CogniMem

@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from memory_agent.agent.registry import ToolRegistry, tool, get_registry
 
